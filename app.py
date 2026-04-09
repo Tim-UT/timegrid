@@ -15,7 +15,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / 'static'
 DATA_DIR = BASE_DIR / 'data'
 DATA_FILE = DATA_DIR / 'store.json'
+AUTH_STATE_FILE = DATA_DIR / 'auth-state.json'
 
 APP_BASE_URL = os.environ.get('APP_BASE_URL', 'https://calendar.time-grid.org').rstrip('/')
 MASTODON_BASE_URL = os.environ.get('MASTODON_BASE_URL', 'https://social.time-grid.org').rstrip('/')
@@ -37,6 +38,8 @@ OFFICIAL_F1_TITLE = 'F1'
 OFFICIAL_F1_URL = 'https://ics.ecal.com/ecal-sub/65df431b44c8c20008a014e4/Formula%201.ics'
 OFFICIAL_BUNDLE_SLUG = 'official-sources'
 SESSION_COOKIE = 'tg_session'
+SESSION_MAX_AGE = 60 * 60 * 24 * 14
+PENDING_AUTH_MAX_AGE = 60 * 30
 PORT = int(os.environ.get('PORT', '9100'))
 
 pending_auth: dict[str, dict[str, Any]] = {}
@@ -88,6 +91,56 @@ def save_store(data: dict[str, Any]) -> None:
         os.fsync(tmp.fileno())
         temp_name = tmp.name
     os.replace(temp_name, DATA_FILE)
+
+
+def write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False, dir=DATA_DIR) as tmp:
+        json.dump(payload, tmp, ensure_ascii=True, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        temp_name = tmp.name
+    os.replace(temp_name, path)
+
+
+def ensure_auth_state() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not AUTH_STATE_FILE.exists():
+        write_json_file(AUTH_STATE_FILE, {'pending_auth': {}, 'sessions': {}})
+
+
+def prune_auth_state(now_ts: float | None = None) -> bool:
+    now_ts = time.time() if now_ts is None else now_ts
+    changed = False
+    for state, auth in list(pending_auth.items()):
+        created_at = float(auth.get('created_at') or 0)
+        if not created_at or now_ts - created_at > PENDING_AUTH_MAX_AGE:
+            pending_auth.pop(state, None)
+            changed = True
+    for session_id, session in list(sessions.items()):
+        created_at = float(session.get('created_at') or 0)
+        max_age = int(session.get('max_age') or SESSION_MAX_AGE)
+        if not created_at or now_ts - created_at > max_age:
+            sessions.pop(session_id, None)
+            changed = True
+    return changed
+
+
+def load_auth_state() -> None:
+    global pending_auth, sessions
+    ensure_auth_state()
+    with AUTH_STATE_FILE.open('r', encoding='utf-8') as fh:
+        data = json.load(fh)
+    pending_auth = data.get('pending_auth', {})
+    sessions = data.get('sessions', {})
+    if prune_auth_state():
+        save_auth_state()
+
+
+def save_auth_state() -> None:
+    ensure_auth_state()
+    prune_auth_state()
+    write_json_file(AUTH_STATE_FILE, {'pending_auth': pending_auth, 'sessions': sessions})
 
 
 def now_iso() -> str:
@@ -517,8 +570,10 @@ def create_session_for_user(user: dict[str, Any], *, provider: str, role: str = 
         'created_at': time.time(),
         'auth_provider': provider,
         'access_token': '',
+        'max_age': SESSION_MAX_AGE,
     }
     sessions[session_id] = session
+    save_auth_state()
     return session_id, session
 
 
@@ -2204,12 +2259,14 @@ class Handler(BaseHTTPRequestHandler):
             'next': next_path,
             'created_at': time.time(),
         }
+        save_auth_state()
         self.redirect(f'{config["authorize_url"]}?{urllib.parse.urlencode(params)}')
 
     def finish_external_auth(self, provider_id: str, params: dict[str, str]) -> None:
         code = str(params.get('code') or '')
         state = str(params.get('state') or '')
         auth_ctx = pending_auth.pop(state, None)
+        save_auth_state()
         if not code or not auth_ctx or auth_ctx.get('provider') != provider_id:
             self.redirect('/auth?next=%2F')
             return
@@ -2275,7 +2332,8 @@ class Handler(BaseHTTPRequestHandler):
             for key, value in headers.items():
                 self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
     def send_json(self, status: int, payload: Any, headers: dict[str, str] | None = None) -> None:
         merged = {'Cache-Control': 'no-store'}
@@ -2300,6 +2358,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(HTTPStatus.FOUND, b'', headers=merged)
 
     def current_session(self) -> dict[str, Any] | None:
+        if prune_auth_state():
+            save_auth_state()
         raw = self.headers.get('Cookie')
         if not raw:
             return None
@@ -2344,6 +2404,19 @@ class Handler(BaseHTTPRequestHandler):
         mime, _ = mimetypes.guess_type(str(path))
         self.send_bytes(200, path.read_bytes(), mime or 'application/octet-stream')
 
+    def do_HEAD(self) -> None:
+        self.do_GET()
+
+    def do_OPTIONS(self) -> None:
+        headers = {
+            'Allow': 'GET, HEAD, POST, PATCH, DELETE, OPTIONS',
+            'Access-Control-Allow-Methods': 'GET, HEAD, POST, PATCH, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Cache-Control': 'no-store',
+        }
+        headers.update(self.mastodon_cors_headers())
+        self.send_bytes(HTTPStatus.NO_CONTENT, b'', headers=headers)
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -2385,6 +2458,7 @@ class Handler(BaseHTTPRequestHandler):
             verifier = secrets.token_urlsafe(64)
             challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
             pending_auth[state] = {'verifier': verifier, 'next': next_path, 'created_at': time.time()}
+            save_auth_state()
             authorize = (
                 f'{MASTODON_BASE_URL}/oauth/authorize?response_type=code'
                 f'&client_id={urllib.parse.quote(MASTODON_CLIENT_ID)}'
@@ -2405,6 +2479,7 @@ class Handler(BaseHTTPRequestHandler):
             code = query.get('code', [''])[0]
             state = query.get('state', [''])[0]
             auth_ctx = pending_auth.pop(state, None)
+            save_auth_state()
             if not code or not auth_ctx:
                 self.redirect('/auth?next=%2F')
                 return
@@ -2455,6 +2530,7 @@ class Handler(BaseHTTPRequestHandler):
             session_id, session_data = create_session_for_user(user, provider='mastodon', role=role)
             session_data['access_token'] = token
             session_data['account_id'] = str(account.get('id'))
+            save_auth_state()
             next_path = auth_ctx.get('next') or f'/u/{acct}'
             next_path = safe_post_auth_path(next_path, acct)
             self.redirect(next_path, headers={'Set-Cookie': make_cookie_header(session_id)})
@@ -2961,6 +3037,7 @@ class Handler(BaseHTTPRequestHandler):
                     if value is session:
                         sessions.pop(key, None)
                         break
+                save_auth_state()
             self.send_json(200, {'ok': True}, headers={'Set-Cookie': clear_cookie_header()})
             return
 
@@ -3588,7 +3665,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     ensure_store()
-    server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
+    load_auth_state()
+    server = HTTPServer(('127.0.0.1', PORT), Handler)
     print(f'Listening on http://127.0.0.1:{PORT}')
     server.serve_forever()
 
