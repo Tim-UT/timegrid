@@ -3,6 +3,38 @@
     return ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][date.getUTCDay()];
   }
 
+  function encodeOccurrenceId(occurrenceId) {
+    return Array.from(String(occurrenceId || ''))
+      .map((char) => char.charCodeAt(0).toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  function decodeOccurrenceId(encoded) {
+    const raw = String(encoded || '');
+    let out = '';
+    for (let index = 0; index < raw.length; index += 2) {
+      const chunk = raw.slice(index, index + 2);
+      if (chunk.length < 2) break;
+      out += String.fromCharCode(parseInt(chunk, 16));
+    }
+    return out;
+  }
+
+  function occurrenceEventId(seriesId, occurrenceId) {
+    return `${seriesId}__occ__${encodeOccurrenceId(occurrenceId)}`;
+  }
+
+  function parseOccurrenceEventId(eventId) {
+    const raw = String(eventId || '');
+    const marker = '__occ__';
+    const index = raw.indexOf(marker);
+    if (index < 0) return { seriesId: raw, occurrenceId: '' };
+    return {
+      seriesId: raw.slice(0, index),
+      occurrenceId: decodeOccurrenceId(raw.slice(index + marker.length)),
+    };
+  }
+
   function normalizeEvent(item) {
     return {
       ...item,
@@ -65,9 +97,9 @@
           if (isExcluded(base, occurrenceId)) continue;
           const override = applyOverride(base, occurrenceId);
           if (override) {
-            out.push({ ...override, id: `${base.id}::${occurrenceId}`, _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true, _isOverride: true });
+            out.push({ ...override, id: occurrenceEventId(base.id, occurrenceId), _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true, _isOverride: true });
           } else {
-            out.push({ ...base, id: `${base.id}::${occurrenceId}`, start: occurrenceId, end: new Date(occurrenceStart.getTime() + duration).toISOString(), _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true });
+            out.push({ ...base, id: occurrenceEventId(base.id, occurrenceId), start: occurrenceId, end: new Date(occurrenceStart.getTime() + duration).toISOString(), _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true });
           }
         }
       }
@@ -80,9 +112,9 @@
       if (isExcluded(base, occurrenceId)) continue;
       const override = applyOverride(base, occurrenceId);
       if (override) {
-        out.push({ ...override, id: `${base.id}::${occurrenceId}`, _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true, _isOverride: true });
+        out.push({ ...override, id: occurrenceEventId(base.id, occurrenceId), _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true, _isOverride: true });
       } else {
-        out.push({ ...base, id: `${base.id}::${occurrenceId}`, start: occurrenceId, end: new Date(cursor.getTime() + duration).toISOString(), _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true });
+        out.push({ ...base, id: occurrenceEventId(base.id, occurrenceId), start: occurrenceId, end: new Date(cursor.getTime() + duration).toISOString(), _seriesId: base.id, _occurrenceId: occurrenceId, _isOccurrence: true });
       }
     }
     return out;

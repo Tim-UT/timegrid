@@ -10,6 +10,11 @@ const state = {
   message: '',
   error: '',
   publishOpen: false,
+  exportOpen: false,
+  exportPdfView: 'month',
+  exportYear: new Date().getFullYear(),
+  exportLinkMode: 'dynamic',
+  exportLinkUrl: '',
   mergeToolOpen: false,
   mergeToolSourceId: '',
   publishedCategory: 'public',
@@ -38,7 +43,6 @@ const state = {
   timelineHint: '',
   recurrenceConversion: null,
   eventDetail: null,
-  officialRegistryDrafts: [],
 };
 
 function escapeHtml(value) {
@@ -80,49 +84,13 @@ function currentTimelineId() {
   return parts[3] === 'new' ? null : parts[3];
 }
 
-function eventDetailBackdrop() {
-  return document.querySelector('[data-event-detail-backdrop="true"]');
-}
-
-function syncEventDetailModal() {
-  eventDetailBackdrop()?.remove();
-  if (!state.eventDetail) return;
-  root.insertAdjacentHTML('beforeend', eventDetailModal());
-  bindEventDetailActions();
-}
-
 function closeEventDetail() {
   state.eventDetail = null;
-  syncEventDetailModal();
+  render();
 }
 
-function formatEventDateRange(startIso, endIso, allDay = false) {
+function formatEventDateRange(startIso, endIso) {
   if (!startIso) return '';
-  const isDateOnly = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-  if (allDay || isDateOnly(startIso) || isDateOnly(endIso || '')) {
-    const parseDateOnly = (value) => {
-      if (!isDateOnly(value)) return null;
-      const [year, month, day] = value.split('-').map(Number);
-      return new Date(year, month - 1, day, 12, 0, 0, 0);
-    };
-    const startDate = parseDateOnly(startIso);
-    const endDate = parseDateOnly(endIso || '');
-    if (!startDate || Number.isNaN(startDate.getTime())) return '';
-    const dayText = new Intl.DateTimeFormat(undefined, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    }).format(startDate);
-    if (!endDate || Number.isNaN(endDate.getTime()) || startIso === endIso) return `${dayText} · All day`;
-    const endDayText = new Intl.DateTimeFormat(undefined, {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    }).format(endDate);
-    return `${dayText} -> ${endDayText} · All day`;
-  }
   const start = new Date(startIso);
   const end = endIso ? new Date(endIso) : null;
   if (Number.isNaN(start.getTime())) return '';
@@ -154,13 +122,13 @@ function eventDetailModal() {
   const locationLabel = detail.location ? `<div class="meta-card"><span class="meta-label">Location</span><strong>${escapeHtml(detail.location)}</strong></div>` : '';
   const linkLabel = detail.url ? `<div class="meta-card"><span class="meta-label">Link</span><a href="${escapeHtml(detail.url)}" target="_blank" rel="noreferrer">${escapeHtml(detail.url)}</a></div>` : '';
   return `
-    <div class="modal-backdrop" data-action="close-event-detail" data-event-detail-backdrop="true">
+    <div class="modal-backdrop" data-action="close-event-detail">
       <div class="modal event-detail-modal" onclick="event.stopPropagation()">
         <div class="modal-header">
           <div>
             <div class="eyebrow">Event details</div>
             <h2>${escapeHtml(detail.title || 'Untitled event')}</h2>
-            <p class="muted">${escapeHtml(formatEventDateRange(detail.start, detail.end, detail.all_day))}</p>
+            <p class="muted">${escapeHtml(formatEventDateRange(detail.start, detail.end))}</p>
           </div>
           <button class="modal-close" data-action="close-event-detail" aria-label="Close event details">×</button>
         </div>
@@ -184,70 +152,6 @@ function currentWorkspaceMode() {
   return 'personal';
 }
 
-function isOfficialRegistryWorkspace() {
-  return currentWorkspaceMode() === 'personal' && state.me?.is_admin && state.personal?.user?.acct === 'official';
-}
-
-function officialRegistryRows() {
-  const persisted = (state.personal?.official_registry_rows || []).map((item) => ({ ...item, persisted: true }));
-  return [...persisted, ...(state.officialRegistryDrafts || []).map((item) => ({ ...item, persisted: false }))];
-}
-
-function officialRegistrySection() {
-  if (!isOfficialRegistryWorkspace()) return '';
-  const rows = officialRegistryRows();
-  return `
-    <section class="official-registry-card">
-      <div class="section-header">
-        <div>
-          <div class="eyebrow">Official Registry</div>
-          <h3>Admin source sheet</h3>
-        </div>
-        <button class="button primary" data-action="official-add-source">Add row</button>
-      </div>
-      <p class="muted official-registry-copy">Manage official timeline sources like a spreadsheet. Fill in a unique code, source link, file type, hashtags, and description for each row.</p>
-      <div class="official-sheet-wrap">
-        <table class="official-sheet">
-          <thead>
-            <tr>
-              <th>Code</th>
-              <th>Title</th>
-              <th>Source link</th>
-              <th>Type</th>
-              <th>Hashtags</th>
-              <th>Description</th>
-              <th>Visible</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.length ? rows.map((item, index) => `
-              <tr data-official-row="${escapeHtml(item.id || item.local_id || `draft-${index}`)}" data-persisted="${item.persisted ? 'true' : 'false'}">
-                <td><input data-field="source_code" value="${escapeHtml(item.source_code || '')}" placeholder="F1-2026" /></td>
-                <td><input data-field="title" value="${escapeHtml(item.title || '')}" placeholder="Formula 1" /></td>
-                <td><input data-field="url" value="${escapeHtml(item.url || '')}" placeholder="https://..." /></td>
-                <td>
-                  <select data-field="source_format">
-                    <option value="ical" ${(item.source_format || 'ical') === 'ical' ? 'selected' : ''}>iCal</option>
-                    <option value="csv" ${item.source_format === 'csv' ? 'selected' : ''}>CSV</option>
-                    <option value="link" ${item.source_format === 'link' ? 'selected' : ''}>Link</option>
-                  </select>
-                </td>
-                <td><input data-field="hashtags" value="${escapeHtml((item.hashtags || []).map((tag) => `#${tag}`).join(' '))}" placeholder="#f1 #official" /></td>
-                <td><textarea data-field="description" placeholder="What this source is for">${escapeHtml(item.description || '')}</textarea></td>
-                <td><input type="checkbox" data-field="visible" ${item.visible !== false ? 'checked' : ''} /></td>
-                <td class="official-sheet-actions">
-                  <button class="button primary" data-action="official-save-source" data-id="${escapeHtml(item.id || item.local_id || `draft-${index}`)}">Save</button>
-                  <button class="button" data-action="official-delete-source" data-id="${escapeHtml(item.id || item.local_id || `draft-${index}`)}">${item.persisted ? 'Trash' : 'Remove'}</button>
-                </td>
-              </tr>
-            `).join('') : '<tr><td colspan="8" class="official-sheet-empty">No official sources yet.</td></tr>'}
-          </tbody>
-        </table>
-      </div>
-    </section>`;
-}
-
 async function loadWorkspace() {
   const mode = currentWorkspaceMode();
   const endpoint = mode === 'creator'
@@ -256,7 +160,6 @@ async function loadWorkspace() {
       ? `/api/archive/${encodeURIComponent(currentAcct())}`
       : `/api/personal/${encodeURIComponent(currentAcct())}`;
   state.personal = await api(endpoint);
-  state.officialRegistryDrafts = [];
 }
 
 function updateSubscriptionColorState(subscriptionId, color) {
@@ -578,7 +481,7 @@ function notificationsModal() {
           ${state.notices.length ? state.notices.map((item) => `
             <article class="check-row ${item.read_at ? '' : 'notice-unread'}">
               <div class="check-copy">
-                <div class="title-with-badge"><strong>${escapeHtml(item.title)}</strong>${officialBadge}</div>
+                <strong>${escapeHtml(item.title)}</strong>
                 ${item.body ? `<div class="muted">${escapeHtml(item.body)}</div>` : ''}
                 <div class="muted">${new Date(item.created_at || '').toLocaleString()}</div>
                 <div class="modal-actions">
@@ -625,36 +528,298 @@ function goToMastodonHome() {
   window.location.href = 'https://social.time-grid.org/home';
 }
 
+
+function exportDownloadUrl(kind) {
+  const base = `/api/personal/${encodeURIComponent(currentAcct())}/exports/current.${kind}`;
+  if (kind !== 'pdf') return base;
+  const params = new URLSearchParams({
+    view: 'month',
+    year: String(state.exportYear || new Date().getFullYear()),
+  });
+  return `${base}?${params.toString()}`;
+}
+
+function exportModal() {
+  if (!state.exportOpen || currentWorkspaceMode() !== 'personal') return '';
+  return `
+    <div class="modal-backdrop" data-action="close-export">
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">Export</div>
+            <h2>Export personal calendar</h2>
+            <p class="muted">Export only the visible timelines from your personal page. Dynamic iCal link is recommended.</p>
+          </div>
+          <button class="modal-close" data-action="close-export" aria-label="Close export">×</button>
+        </div>
+        <div class="check-list">
+          <article class="check-row">
+            <div class="check-copy">
+              <strong>iCal link <span class="eyebrow">Recommended</span></strong>
+              <div class="muted">Use in Apple Calendar or Google Calendar subscription. Static is frozen; dynamic updates when your visible personal page changes.</div>
+              <div class="modal-actions">
+                <label><input type="radio" name="export-link-mode" value="dynamic" ${state.exportLinkMode === 'dynamic' ? 'checked' : ''} /> Dynamic</label>
+                <label><input type="radio" name="export-link-mode" value="static" ${state.exportLinkMode === 'static' ? 'checked' : ''} /> Static</label>
+                <button class="primary" data-action="generate-export-link">Generate link</button>
+              </div>
+              ${state.exportLinkUrl ? `<div class="meta-list"><input value="${escapeHtml(state.exportLinkUrl)}" readonly data-export-link-value /><div class="modal-actions"><button data-action="copy-export-link">Copy link</button><a class="button" href="${escapeHtml(state.exportLinkUrl)}" target="_blank" rel="noreferrer">Open link</a></div></div>` : ''}
+            </div>
+          </article>
+          <article class="check-row">
+            <div class="check-copy">
+              <strong>File export</strong>
+              <div class="muted">Download the current visible personal calendar as standalone files.</div>
+              <div class="modal-actions">
+                <button class="primary" data-action="download-export-ics">Download iCal file</button>
+                <button data-action="download-export-csv">Download CSV file</button>
+              </div>
+            </div>
+          </article>
+          <article class="check-row">
+            <div class="check-copy">
+              <strong>PDF</strong>
+              <div class="muted">Month view only. Includes timeline names, TimeGrid name and website, and author metadata.</div>
+              <div class="modal-actions">
+                <label>Year
+                  <input type="number" min="2000" max="2100" value="${escapeHtml(state.exportYear)}" data-action="export-year" />
+                </label>
+                <button class="primary" data-action="download-export-pdf">Download Month PDF</button>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div class="modal-actions">
+          <button data-action="close-export">Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindExportActions() {
+  document.querySelector('[data-action="open-export"]')?.addEventListener('click', () => {
+    state.exportOpen = true;
+    render();
+  });
+  document.querySelectorAll('[data-action="close-export"]').forEach((node) => node.addEventListener('click', () => {
+    state.exportOpen = false;
+    render();
+  }));
+  document.querySelector('[data-action="download-export-ics"]')?.addEventListener('click', () => {
+    window.open(exportDownloadUrl('ics'), '_blank', 'noopener');
+  });
+  document.querySelector('[data-action="download-export-csv"]')?.addEventListener('click', () => {
+    window.open(exportDownloadUrl('csv'), '_blank', 'noopener');
+  });
+  document.querySelector('[data-action="download-export-pdf"]')?.addEventListener('click', () => {
+    window.open(exportDownloadUrl('pdf'), '_blank', 'noopener');
+  });
+  document.querySelector('[data-action="export-pdf-view"]')?.addEventListener('change', (event) => {
+    state.exportPdfView = 'month';
+  });
+  document.querySelector('[data-action="export-year"]')?.addEventListener('change', (event) => {
+    const year = Number(event.target.value);
+    state.exportYear = Number.isFinite(year) ? year : new Date().getFullYear();
+  });
+  document.querySelectorAll('input[name="export-link-mode"]').forEach((node) => node.addEventListener('change', (event) => {
+    state.exportLinkMode = event.target.value || 'dynamic';
+  }));
+  document.querySelector('[data-action="generate-export-link"]')?.addEventListener('click', async () => {
+    try {
+      const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/exports`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: state.exportLinkMode || 'dynamic' }),
+      });
+      state.exportLinkUrl = data.url || '';
+      showToast(`${data.mode === 'dynamic' ? 'Dynamic' : 'Static'} link ready`);
+      render();
+    } catch (error) {
+      setBanner('', error.message || 'Could not create export link');
+    }
+  });
+  document.querySelector('[data-action="copy-export-link"]')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(state.exportLinkUrl || '');
+      showToast('Copied');
+    } catch (_error) {
+      showToast('Copy failed');
+    }
+  });
+}
+
+function currentTopSection() {
+  if (page === 'community' || page === 'community-profile') return 'community';
+  if (page === 'published' || page === 'published-detail' || page === 'published-embed') return 'published';
+  if ((page === 'personal' || page === 'creator' || page === 'archive' || page === 'timeline') && currentAcct() === 'official') return 'official';
+  if (page === 'creator' || page === 'timeline') return 'creator';
+  if (page === 'archive') return 'archive';
+  return 'personal';
+}
+
+function topNavAcct() {
+  if (page === 'personal' || page === 'creator' || page === 'archive' || page === 'timeline') return currentAcct() || state.me?.acct || '';
+  return state.me?.acct || '';
+}
+
+function topNavHref(section) {
+  const acct = topNavAcct();
+  if (section === 'community') return '/people';
+  if (section === 'published') return '/published';
+  if (section === 'official') return '/u/official/creator';
+  if (!acct) return loginHref(window.location.pathname || '/');
+  if (section === 'creator') return `/u/${encodeURIComponent(acct)}/creator`;
+  if (section === 'archive') return `/u/${encodeURIComponent(acct)}/archive`;
+  return `/u/${encodeURIComponent(acct)}`;
+}
+
+function sectionNav() {
+  const current = currentTopSection();
+  const tabs = [
+    { key: 'personal', label: 'Personal' },
+    { key: 'creator', label: 'Creator' },
+    { key: 'archive', label: 'Archive' },
+    { key: 'community', label: 'Community' },
+    { key: 'published', label: 'Published' },
+  ];
+  if (state.me?.is_admin) tabs.push({ key: 'official', label: 'Official' });
+  return `
+    <nav class="section-nav" aria-label="Primary sections">
+      ${tabs.map((tab) => `<a class="section-nav__link ${current === tab.key ? 'active' : ''}" href="${topNavHref(tab.key)}">${tab.label}</a>`).join('')}
+    </nav>`;
+}
+
+function isOfficialRegistryMode() {
+  const user = state.personal?.user;
+  return currentWorkspaceMode() === 'creator' && user?.is_admin && user?.acct === 'official';
+}
+
+function parseHashtagText(value) {
+  return String(value || '')
+    .replaceAll('#', ' ')
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function formatHashtagText(tags) {
+  return (tags || []).map((tag) => `#${tag}`).join(' ');
+}
+
+function officialRegistryTableMarkup() {
+  const rows = state.personal?.official_registry_rows || [];
+  return `
+    <section class="official-registry-section">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">Official source manager</div>
+          <h2>Official publish registry</h2>
+          <p class="muted">Admin spreadsheet for official source links. Each row controls source code, feed link, hashtags, description, format, and visibility.</p>
+        </div>
+        <button class="primary" data-action="official-add-row">Add row</button>
+      </div>
+      <div class="official-registry-wrap">
+        <table class="official-registry-table">
+          <thead>
+            <tr>
+              <th>Code</th>
+              <th>Title</th>
+              <th>Subscribe link</th>
+              <th>Format</th>
+              <th>Hashtags</th>
+              <th>Description</th>
+              <th>Visibility</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="official-registry-body">
+            ${rows.map((row) => `
+              <tr data-row-id="${row.id}">
+                <td><input data-field="source_code" value="${escapeHtml(row.source_code || '')}" placeholder="F1" /></td>
+                <td><input data-field="title" value="${escapeHtml(row.title || '')}" placeholder="Formula 1" /></td>
+                <td><input data-field="url" value="${escapeHtml(row.url || '')}" placeholder="https://...ics/.csv" /></td>
+                <td>
+                  <select data-field="source_format">
+                    <option value="" ${!row.source_format ? 'selected' : ''}>Auto</option>
+                    <option value="ical" ${row.source_format === 'ical' ? 'selected' : ''}>iCal</option>
+                    <option value="csv" ${row.source_format === 'csv' ? 'selected' : ''}>CSV</option>
+                  </select>
+                </td>
+                <td><input data-field="hashtags" value="${escapeHtml(formatHashtagText(row.hashtags || []))}" placeholder="#official #f1" /></td>
+                <td><textarea data-field="description" placeholder="Short source description">${escapeHtml(row.description || '')}</textarea></td>
+                <td>
+                  <select data-field="visible">
+                    <option value="true" ${row.visible ? 'selected' : ''}>Visible</option>
+                    <option value="false" ${row.visible ? '' : 'selected'}>Hidden</option>
+                  </select>
+                </td>
+                <td class="row-actions">
+                  <button data-action="official-save-row" data-id="${row.id}">Save</button>
+                  <button class="danger" data-action="official-trash-row" data-id="${row.id}">Trash</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+          <tbody id="official-registry-drafts"></tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+function officialDraftRowMarkup(index) {
+  return `
+    <tr data-draft-index="${index}">
+      <td><input data-field="source_code" placeholder="Code" /></td>
+      <td><input data-field="title" placeholder="Title" /></td>
+      <td><input data-field="url" placeholder="https://...ics/.csv" /></td>
+      <td>
+        <select data-field="source_format">
+          <option value="" selected>Auto</option>
+          <option value="ical">iCal</option>
+          <option value="csv">CSV</option>
+        </select>
+      </td>
+      <td><input data-field="hashtags" placeholder="#official" /></td>
+      <td><textarea data-field="description" placeholder="Description"></textarea></td>
+      <td>
+        <select data-field="visible">
+          <option value="true" selected>Visible</option>
+          <option value="false">Hidden</option>
+        </select>
+      </td>
+      <td class="row-actions">
+        <button class="primary" data-action="official-create-row">Create</button>
+        <button data-action="official-remove-draft">Remove</button>
+      </td>
+    </tr>`;
+}
+
 function personalToolbar() {
   const me = state.me;
   const user = state.personal.user;
   const creatorMode = currentWorkspaceMode() === 'creator';
   const archiveMode = currentWorkspaceMode() === 'archive';
-  const canManageWorkspace = user.is_owner || (me?.is_admin && user.acct === 'official');
-  const adminOfficialLink = me?.is_admin ? `<a class="button" href="/u/official">Official sources</a>` : '';
+  const actions = user.is_owner ? (creatorMode
+    ? `<a class="button primary" href="/u/${encodeURIComponent(user.acct)}/timelines/new">Create a new timeline</a><button data-action="import-personal">Import file</button><button data-action="open-merge-tool">Merge & separate</button><button class="primary" data-action="open-publish">Publish</button>`
+    : archiveMode
+      ? ''
+      : `<a class="button primary" href="/u/${encodeURIComponent(user.acct)}/timelines/new">Create a new timeline</a><button data-action="import-personal">Import file</button><button data-action="open-merge-tool">Merge & separate</button><button data-action="open-export">Export</button>`)
+    : '';
   return `
     <header class="topbar">
-      <div class="brand">
-        <div class="eyebrow">TimeGrid Calendar</div>
-        <div class="brand-title-row">
-          <h1>${escapeHtml(user.display_name || user.acct)}</h1>
-          <button data-action="logout">Sign out @${escapeHtml(me.acct)}</button>
+      <div class="topbar-main">
+        <div class="brand">
+          <div class="eyebrow">TimeGrid Calendar</div>
+          <div class="brand-title-row">
+            <h1>${escapeHtml(user.display_name || user.acct)}</h1>
+          </div>
+          <p>${creatorMode ? 'Creator management for publishing, creator-owned timelines, and contributor-managed bundles.' : archiveMode ? 'Archive page for timelines you no longer need to update or edit.' : 'Personal calendar workspace with subscriptions, visibility, trash, and editable self-owned timelines.'}</p>
         </div>
-        <p>${creatorMode ? 'Creator management for publishing, creator-owned timelines, and contributor-managed bundles.' : archiveMode ? 'Archive page for timelines you no longer need to update or edit.' : 'Personal calendar workspace with subscriptions, visibility, trash, and editable self-owned timelines.'}</p>
+        <div class="topbar-utility">
+          <button data-action="logout">Sign out @${escapeHtml(me.acct)}</button>
+          ${notificationsButton()}
+        </div>
       </div>
-      <div class="toolbar">
-        <button data-action="go-mastodon-home">Mastodon</button>
-        <a class="button" href="/published">Published calendars</a>
-        <a class="button" href="/people">Community</a>
-        ${adminOfficialLink}
-        ${canManageWorkspace ? (creatorMode
-          ? `<a class="button" href="/u/${encodeURIComponent(user.acct)}">Personal page</a><a class="button" href="/u/${encodeURIComponent(user.acct)}/archive">Archive page</a><a class="button primary" href="/u/${encodeURIComponent(user.acct)}/timelines/new">Create a new timeline</a><button data-action="import-personal">Import file</button><button data-action="open-merge-tool">Merge & separate</button><button class="primary" data-action="open-publish">Publish</button>`
-          : archiveMode
-            ? `<a class="button" href="/u/${encodeURIComponent(user.acct)}">Personal page</a><a class="button" href="/u/${encodeURIComponent(user.acct)}/creator">Creator management</a>`
-            : `<a class="button" href="/u/${encodeURIComponent(user.acct)}/creator">Creator management</a><a class="button" href="/u/${encodeURIComponent(user.acct)}/archive">Archive page</a><a class="button primary" href="/u/${encodeURIComponent(user.acct)}/timelines/new">Create a new timeline</a><button data-action="import-personal">Import file</button>`)
-          : ''}
-        ${notificationsButton()}
-      </div>
+      ${sectionNav()}
+      ${actions ? `<div class="toolbar toolbar--context">${actions}</div>` : ''}
     </header>`;
 }
 
@@ -662,7 +827,6 @@ function subscriptionCard(item) {
   const bundleChildren = item.is_bundle ? (item.components || []) : [];
   const creatorMode = currentWorkspaceMode() === 'creator';
   const archiveMode = currentWorkspaceMode() === 'archive';
-  const officialBadge = item.official ? '<span class="auth-provider-badge official-badge">Official</span>' : '';
   const editControl = item.edit_url
     ? `<a class="button" href="${escapeHtml(item.edit_url)}">Edit</a>`
     : item.editable_shell
@@ -672,7 +836,7 @@ function subscriptionCard(item) {
     <article class="sub-card ${item.visible ? 'active' : ''}">
       <header>
         <div>
-          <div class="title-with-badge"><strong>${escapeHtml(item.title)}</strong>${officialBadge}</div>
+          <strong>${escapeHtml(item.title)}</strong>
           <div class="muted">${item.is_bundle ? `Merged timeline with ${item.component_count || 0} hidden internal timelines` : item.owned_timeline_id ? 'Self-owned timeline feed' : item.editable_shell ? 'External timeline with editable shell support' : item.visible ? 'Visible in calendar' : 'Hidden from calendar'}</div>
           ${item.availability_note ? `<div class="muted unavailable-note">${escapeHtml(item.availability_note)}</div>` : ''}
           <div class="row"><input type="color" class="color-picker" data-action="subscription-color" data-id="${item.id}" value="${escapeHtml(item.color || '#1f7a8c')}" aria-label="Timeline color for ${escapeHtml(item.title)}" /></div>
@@ -723,7 +887,6 @@ function trashCard(item) {
 
 function publishCard(item, options = {}) {
   const manage = !!options.manage;
-  const officialBadge = item.official ? '<span class="auth-provider-badge official-badge">Official</span>' : '';
   const visibilityLabel = item.visibility === 'private' ? 'Private' : (item.visibility === 'invited' ? `Invited${item.invited?.length ? ` · ${item.invited.length} invited` : ''}` : 'Public');
   const subscribeControl = item.subscribed
     ? '<button class="button" disabled>Added to my calendar</button>'
@@ -740,10 +903,10 @@ function publishCard(item, options = {}) {
     <article class="public-card">
       <header>
         <div>
-          <div class="title-with-badge"><strong>${escapeHtml(item.title)}</strong>${officialBadge}</div>
+          <strong>${escapeHtml(item.title)}</strong>
           <div class="muted">${escapeHtml(item.subscription_count)} subscriptions</div>
           <div class="muted">${escapeHtml(visibilityLabel)}</div>
-          <div class="muted">${item.official ? '' : `By <a href="/people/${encodeURIComponent(item.owner_acct || '')}">@${escapeHtml(item.owner_acct || '')}</a>`}</div>
+          <div class="muted">By <a href="/people/${encodeURIComponent(item.owner_acct || '')}">@${escapeHtml(item.owner_acct || '')}</a></div>
           ${publishStateLabel ? `<div class="muted">${escapeHtml(publishStateLabel)}</div>` : ''}
           ${contributorText ? `<div class="muted">Authors: ${escapeHtml(contributorText)}</div>` : ''}
         </div>
@@ -968,7 +1131,6 @@ function renderPersonal() {
   const subscriptionLabel = creatorMode ? 'Creator managed timelines' : archiveMode ? 'Archived timelines' : 'Subscriptions';
   const workspaceLabel = creatorMode ? 'Creator management' : archiveMode ? 'Archive page' : 'Personal page';
   const timelineLabel = creatorMode ? 'Editable timelines in creator management' : archiveMode ? 'Archived timelines' : 'Timelines created by me';
-  const officialRegistryMode = isOfficialRegistryWorkspace();
   root.innerHTML = `
     <div class="page-shell">
       ${personalToolbar()}
@@ -979,7 +1141,7 @@ function renderPersonal() {
               <h2>${subscriptionLabel}</h2>
               <span class="muted">${state.personal.subscriptions.length}</span>
             </div>
-            ${creatorMode ? '<div class="empty">Creator-managed timelines stay here even if they no longer belong in the personal workspace.</div>' : archiveMode ? '<div class="empty">Archived timelines stay on the server but are not meant for active editing.</div>' : officialRegistryMode ? '<div class="empty">Official sources are managed below in the admin spreadsheet. Use the cards here for quick show or hide controls.</div>' : `
+            ${creatorMode ? '<div class="empty">Creator-managed timelines stay here even if they no longer belong in the personal workspace.</div>' : archiveMode ? '<div class="empty">Archived timelines stay on the server but are not meant for active editing.</div>' : `
             <form id="add-form" class="meta-list">
               <input name="title" placeholder="Subscription title" />
               <input name="url" placeholder="https://...ics or https://calendar.time-grid.org/p/..." />
@@ -1006,7 +1168,6 @@ function renderPersonal() {
             ${mastodonProvisioningBanner()}
             ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
             ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
-            ${officialRegistrySection()}
             <section>
               <div class="section-header">
                 <div>
@@ -1047,17 +1208,37 @@ function renderPersonal() {
           </div>
         </main>
       </div>
+      ${exportModal()}
       ${creatorMode ? publishModal() : ''}
       ${mergeToolModal()}
       ${creatorMode ? publishedManageModal() : ''}
       ${notificationsModal()}
+      ${eventDetailModal()}
       <input id="personal-import-input" type="file" accept=".ics,.ical,.csv,text/calendar,text/csv" class="hidden" />
     </div>`;
+
+  const officialRegistryMode = isOfficialRegistryMode();
+  if (officialRegistryMode) {
+    const grid = root.querySelector('.grid');
+    const main = root.querySelector('.main-panel');
+    if (grid && main) {
+      root.querySelector('.sidebar')?.remove();
+      grid.classList.add('official-registry-layout');
+      main.innerHTML = `
+        <div class="calendar-stage">
+          ${mastodonProvisioningBanner()}
+          ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
+          ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
+          ${officialRegistryTableMarkup()}
+        </div>`;
+    }
+  }
 
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   document.querySelector('[data-action="go-mastodon-home"]')?.addEventListener('click', goToMastodonHome);
   bindNoticeActions(renderPersonal);
   bindEventDetailActions();
+  bindExportActions();
   document.querySelector('[data-action="open-merge-tool"]')?.addEventListener('click', () => {
     state.mergeToolOpen = true;
     state.mergeToolSourceId = state.personal?.subscriptions?.find((item) => item.is_bundle)?.id || '';
@@ -1101,75 +1282,6 @@ function renderPersonal() {
     try {
       const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(button.dataset.id)}/editor`, { method: 'POST', body: '{}' });
       window.location.href = data.edit_url;
-    } catch (error) {
-      setBanner('', error.message);
-    }
-  }));
-  document.querySelector('[data-action="official-add-source"]')?.addEventListener('click', () => {
-    state.officialRegistryDrafts.push({
-      local_id: `draft_${Math.random().toString(36).slice(2, 10)}`,
-      title: '',
-      url: '',
-      source_code: '',
-      source_format: 'ical',
-      hashtags: [],
-      description: '',
-      visible: true,
-      official: true,
-    });
-    render();
-  });
-  document.querySelectorAll('[data-action="official-save-source"]').forEach((button) => button.addEventListener('click', async () => {
-    const row = button.closest('[data-official-row]');
-    if (!row) return;
-    const id = row.getAttribute('data-official-row') || '';
-    const payload = {
-      title: row.querySelector('[data-field="title"]')?.value?.trim() || '',
-      url: row.querySelector('[data-field="url"]')?.value?.trim() || '',
-      source_code: row.querySelector('[data-field="source_code"]')?.value?.trim() || '',
-      source_format: row.querySelector('[data-field="source_format"]')?.value || 'ical',
-      hashtags: row.querySelector('[data-field="hashtags"]')?.value || '',
-      description: row.querySelector('[data-field="description"]')?.value || '',
-      visible: !!row.querySelector('[data-field="visible"]')?.checked,
-      official: true,
-    };
-    if (!payload.title || !payload.url) {
-      setBanner('', 'Official source rows need at least a title and source link.');
-      return;
-    }
-    try {
-      if (row.dataset.persisted === 'true') {
-        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(id)}`, {
-          method: 'PATCH',
-          body: JSON.stringify(payload),
-        });
-      } else {
-        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions`, {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
-      }
-      await loadWorkspace();
-      setBanner('Official source saved.');
-      render();
-    } catch (error) {
-      setBanner('', error.message);
-    }
-  }));
-  document.querySelectorAll('[data-action="official-delete-source"]').forEach((button) => button.addEventListener('click', async () => {
-    const row = button.closest('[data-official-row]');
-    if (!row) return;
-    const id = row.getAttribute('data-official-row') || '';
-    if (row.dataset.persisted !== 'true') {
-      state.officialRegistryDrafts = (state.officialRegistryDrafts || []).filter((item) => item.local_id !== id);
-      render();
-      return;
-    }
-    try {
-      await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(id)}/trash`, { method: 'POST', body: '{}' });
-      await loadWorkspace();
-      setBanner('Official source moved to trash.');
-      render();
     } catch (error) {
       setBanner('', error.message);
     }
@@ -1373,6 +1485,82 @@ function renderPersonal() {
       setBanner('', error.message);
     }
   });
+  if (officialRegistryMode) {
+    let draftIndex = 0;
+    const draftBody = document.getElementById('official-registry-drafts');
+    document.querySelector('[data-action="official-add-row"]')?.addEventListener('click', () => {
+      if (!draftBody) return;
+      draftIndex += 1;
+      draftBody.insertAdjacentHTML('beforeend', officialDraftRowMarkup(draftIndex));
+    });
+    root.querySelectorAll('[data-action="official-save-row"]').forEach((button) => button.addEventListener('click', async () => {
+      const row = button.closest('tr');
+      if (!row) return;
+      const id = button.dataset.id || '';
+      const payload = {
+        source_code: row.querySelector('[data-field="source_code"]')?.value || '',
+        title: row.querySelector('[data-field="title"]')?.value || '',
+        url: row.querySelector('[data-field="url"]')?.value || '',
+        source_format: row.querySelector('[data-field="source_format"]')?.value || '',
+        hashtags: parseHashtagText(row.querySelector('[data-field="hashtags"]')?.value || ''),
+        description: row.querySelector('[data-field="description"]')?.value || '',
+        visible: (row.querySelector('[data-field="visible"]')?.value || 'true') === 'true',
+      };
+      try {
+        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        await loadWorkspace();
+        setBanner('Official source row saved.');
+      } catch (error) {
+        setBanner('', error.message || 'Failed to save official row');
+      }
+    }));
+    root.querySelectorAll('[data-action="official-trash-row"]').forEach((button) => button.addEventListener('click', async () => {
+      const id = button.dataset.id || '';
+      const ok = window.confirm('Move this official row to trash?');
+      if (!ok) return;
+      try {
+        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(id)}/trash`, { method: 'POST', body: '{}' });
+        await loadWorkspace();
+        setBanner('Official source row moved to trash.');
+      } catch (error) {
+        setBanner('', error.message || 'Failed to trash official row');
+      }
+    }));
+    root.addEventListener('click', async (event) => {
+      const createBtn = event.target.closest('[data-action="official-create-row"]');
+      if (createBtn) {
+        const row = createBtn.closest('tr');
+        if (!row) return;
+        const payload = {
+          official: true,
+          source_code: row.querySelector('[data-field="source_code"]')?.value || '',
+          title: row.querySelector('[data-field="title"]')?.value || '',
+          url: row.querySelector('[data-field="url"]')?.value || '',
+          source_format: row.querySelector('[data-field="source_format"]')?.value || '',
+          hashtags: parseHashtagText(row.querySelector('[data-field="hashtags"]')?.value || ''),
+          description: row.querySelector('[data-field="description"]')?.value || '',
+          visible: (row.querySelector('[data-field="visible"]')?.value || 'true') === 'true',
+        };
+        try {
+          await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions`, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+          await loadWorkspace();
+          setBanner('Official source row created.');
+        } catch (error) {
+          setBanner('', error.message || 'Failed to create official row');
+        }
+        return;
+      }
+      const removeBtn = event.target.closest('[data-action="official-remove-draft"]');
+      if (removeBtn) removeBtn.closest('tr')?.remove();
+    });
+  }
+
   document.querySelector('[data-action="submit-publish"]')?.addEventListener('click', async () => {
     const title = document.getElementById('publish-title').value.trim();
     const selected = Array.from(document.querySelectorAll('[data-publish-sub]:checked')).map((node) => node.value);
@@ -1442,22 +1630,8 @@ function applyOverride(base, occurrenceId) {
   return window.TimeGridCalendarDomain?.applyOverride?.(base, occurrenceId) || null;
 }
 
-function stripRecurringEvents(events) {
-  return (events || []).map((event) => ({
-    ...event,
-    recurrence: null,
-    exdates: [],
-    overrides: [],
-  }));
-}
-
 function expandEventsList(events) {
-  const items = events || [];
-  try {
-    return window.TimeGridCalendarDomain?.expandEventsList?.(items) || items;
-  } catch (_error) {
-    return stripRecurringEvents(items);
-  }
+  return window.TimeGridCalendarDomain?.expandEventsList?.(events || []) || (events || []);
 }
 
 function expandedCalendarEvents() {
@@ -1582,25 +1756,27 @@ function setCalendarHint(elementId, message) {
 }
 
 function timelineToolbar() {
-  const acct = currentAcct();
   const title = state.timeline?.title || 'Timeline editor';
   const intro = state.timeline?.kind === 'wrapper'
     ? 'Edit a merged timeline or shell calendar here. New events go into your own internal timeline, while existing owned child timelines stay editable in place.'
     : 'Create or import repeating course schedules, then publish them as your own ICS subscription for the personal calendar page.';
   return `
     <header class="topbar">
-      <div class="brand">
-        <div class="eyebrow">Timeline editor</div>
-        <h1>${escapeHtml(title)}</h1>
-        <p>${escapeHtml(intro)}</p>
+      <div class="topbar-main">
+        <div class="brand">
+          <div class="eyebrow">Timeline editor</div>
+          <h1>${escapeHtml(title)}</h1>
+          <p>${escapeHtml(intro)}</p>
+        </div>
+        <div class="topbar-utility">
+          <button data-action="logout">Sign out</button>
+          ${notificationsButton()}
+        </div>
       </div>
-      <div class="toolbar">
-        <a class="button" href="/u/${encodeURIComponent(acct)}">Back to personal page</a>
-        <a class="button" href="/people">Community</a>
+      ${sectionNav()}
+      <div class="toolbar toolbar--context">
         <button data-action="import-editor">Import file</button>
         <button class="primary" data-action="save-timeline">Save timeline</button>
-        <button data-action="logout">Sign out</button>
-        ${notificationsButton()}
       </div>
     </header>`;
 }
@@ -1731,7 +1907,7 @@ function renderTimeline() {
       <div class="editor-layout">
         <aside id="timeline-sidebar-shell" class="sidebar editor-sidebar">${timelineSidebarMarkup()}</aside>
         <main class="main-panel editor-main">
-          <div class="section-header"><div><div class="eyebrow">Timeline calendar</div><h2>${escapeHtml(state.timeline.title || 'New timeline')}</h2><p class="section-copy">Double-click to create. Click an event to edit.</p></div><div class="toolbar"><button data-action="new-event">New event</button><a class="button" href="/u/${encodeURIComponent(acct)}">Personal page</a></div></div>
+          <div class="section-header"><div><div class="eyebrow">Timeline calendar</div><h2>${escapeHtml(state.timeline.title || 'New timeline')}</h2><p class="section-copy">Double-click to create. Click an event to edit.</p></div><div class="toolbar"><button data-action="new-event">New event</button></div></div>
           ${state.timelineHint ? `<div id="timeline-calendar-hint" class="calendar-tip">${escapeHtml(state.timelineHint)}</div>` : '<div id="timeline-calendar-hint" class="calendar-tip hidden"></div>'}<div id="timeline-calendar"></div>
         </main>
       </div>
@@ -1799,7 +1975,19 @@ function initCalendar() {
       renderTimelineSidebarOnly();
     },
     onEditEvent(event) {
-      const [seriesId, occurrenceId] = String(event.id || '').split('::');
+      const parsedEventId = window.TimeGridCalendarDomain?.parseOccurrenceEventId?.(event.id) || { seriesId: String(event.id || ''), occurrenceId: '' };
+      const seriesId = parsedEventId.seriesId;
+      const occurrenceId = parsedEventId.occurrenceId;
+      state.selectedEventId = seriesId;
+      state.selectedOccurrence = occurrenceId ? { recurrenceId: occurrenceId } : null;
+      state.draftEvent = null;
+      state.recurrenceConversion = null;
+      renderTimelineSidebarOnly();
+    },
+    onEventClick(event) {
+      const parsedEventId = window.TimeGridCalendarDomain?.parseOccurrenceEventId?.(event.id) || { seriesId: String(event.id || ''), occurrenceId: '' };
+      const seriesId = parsedEventId.seriesId;
+      const occurrenceId = parsedEventId.occurrenceId;
       state.selectedEventId = seriesId;
       state.selectedOccurrence = occurrenceId ? { recurrenceId: occurrenceId } : null;
       state.draftEvent = null;
@@ -1809,6 +1997,7 @@ function initCalendar() {
     enableDragAndDrop: false,
     enableResize: false,
     enableEventModal: false,
+    useNativeEventModal: false,
   }) || null;
 }
 
@@ -1850,18 +2039,17 @@ function splitIcsLines(text) {
   return out;
 }
 
-function parseIcsDate(value, options = {}) {
+function parseIcsDate(value) {
   const v = String(value || '').trim();
   if (!v) return '';
-  const isDateOnly = String(options.valueType || '').toUpperCase() === 'DATE' || /^\d{8}$/.test(v);
   if (/^\d{8}T\d{6}Z$/.test(v)) {
     return `${v.slice(0,4)}-${v.slice(4,6)}-${v.slice(6,8)}T${v.slice(9,11)}:${v.slice(11,13)}:${v.slice(13,15)}Z`;
   }
   if (/^\d{8}T\d{6}$/.test(v)) {
     return new Date(`${v.slice(0,4)}-${v.slice(4,6)}-${v.slice(6,8)}T${v.slice(9,11)}:${v.slice(11,13)}:${v.slice(13,15)}`).toISOString();
   }
-  if (isDateOnly) {
-    return new Date(`${v.slice(0,4)}-${v.slice(4,6)}-${v.slice(6,8)}T00:00:00Z`).toISOString();
+  if (/^\d{8}$/.test(v)) {
+    return new Date(`${v.slice(0,4)}-${v.slice(4,6)}-${v.slice(6,8)}T00:00:00`).toISOString();
   }
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? '' : d.toISOString();
@@ -1873,21 +2061,6 @@ function unescapeIcsText(value) {
     .replace(/\\,/g, ',')
     .replace(/\\;/g, ';')
     .replace(/\\\\/g, '\\');
-}
-
-function repairTimedIcsEnd(startIso, endIso, description = '') {
-  if (!startIso || !endIso) return endIso;
-  const start = new Date(startIso);
-  const end = new Date(endIso);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return endIso;
-  const durationMs = end.getTime() - start.getTime();
-  const looksLikeCalendarLabsBoilerplate = String(description || '').includes('Thanks for subscribing! Your calendar is ready');
-  const shouldRepair = durationMs > 48 * 60 * 60 * 1000 || (looksLikeCalendarLabsBoilerplate && durationMs > 12 * 60 * 60 * 1000);
-  if (!shouldRepair) return endIso;
-  const repaired = new Date(start);
-  repaired.setUTCHours(end.getUTCHours(), end.getUTCMinutes(), end.getUTCSeconds(), end.getUTCMilliseconds());
-  if (repaired.getTime() <= start.getTime()) repaired.setUTCDate(repaired.getUTCDate() + 1);
-  return repaired.toISOString();
 }
 
 function parseRRule(value) {
@@ -1918,68 +2091,36 @@ function parseIcsFile(text, fallbackTitle) {
     if (idx < 0) continue;
     const left = line.slice(0, idx);
     const value = line.slice(idx + 1);
-    const parts = left.split(';');
-    const key = parts[0].toUpperCase();
-    const params = Object.fromEntries(parts.slice(1).map((part) => {
-      const [paramKey, paramValue] = part.split('=');
-      return [String(paramKey || '').toUpperCase(), paramValue || ''];
-    }));
+    const key = left.split(';', 1)[0].toUpperCase();
     if (key === 'X-WR-CALNAME') calTitle = unescapeIcsText(value) || calTitle;
     if (!current) continue;
     if (key === 'UID') current.uid = value;
     if (key === 'SUMMARY') current.summary = value;
-    if (key === 'DTSTART') {
-      current.start = value;
-      current.startParams = params;
-    }
-    if (key === 'DTEND') {
-      current.end = value;
-      current.endParams = params;
-    }
+    if (key === 'DTSTART') current.start = value;
+    if (key === 'DTEND') current.end = value;
     if (key === 'DESCRIPTION') current.description = value;
     if (key === 'LOCATION') current.location = value;
     if (key === 'URL') current.url = value;
     if (key === 'RRULE') current.rrule = value;
     if (key === 'EXDATE') current.exdate = [...(current.exdate || []), ...value.split(',')];
-    if (key === 'RECURRENCE-ID') {
-      current.recurrenceId = value;
-      current.recurrenceIdParams = params;
-    }
+    if (key === 'RECURRENCE-ID') current.recurrenceId = value;
   }
   const grouped = new Map();
   const standalone = [];
   for (const row of vevents) {
-    const start = parseIcsDate(row.start, row.startParams || {});
-    let end = parseIcsDate(row.end, row.endParams || {});
-    const startIsDateOnly = String(row.startParams?.VALUE || '').toUpperCase() === 'DATE';
-    const endIsDateOnly = String(row.endParams?.VALUE || '').toUpperCase() === 'DATE';
-    if (start && startIsDateOnly) {
-      const startTime = new Date(start).getTime();
-      if (end) {
-        const endTime = new Date(end).getTime();
-        if (!Number.isNaN(startTime) && !Number.isNaN(endTime) && endTime <= startTime) {
-          end = new Date(startTime + 24 * 60 * 60 * 1000).toISOString();
-        }
-      } else if (!Number.isNaN(startTime)) {
-        end = new Date(startTime + 24 * 60 * 60 * 1000).toISOString();
-      }
-    }
-    if (!startIsDateOnly && start && end) end = repairTimedIcsEnd(start, end, row.description || '');
+    const start = parseIcsDate(row.start);
+    let end = parseIcsDate(row.end);
     if (!end && start) end = new Date(new Date(start).getTime() + 60 * 60 * 1000).toISOString();
-    const normalizedTitle = unescapeIcsText(row.summary || 'Imported event');
-    const normalizedDescription = unescapeIcsText(row.description || '');
-    const looksLikeInactivePlaceholder = /^inactive-calendar-/i.test(String(row.uid || '')) || normalizedTitle.toLowerCase() === 'unsynced' || normalizedDescription.includes('You unsynced this calendar.');
     const normalized = {
-      title: normalizedTitle,
+      title: unescapeIcsText(row.summary || 'Imported event'),
       start,
       end,
-      description: normalizedDescription,
+      description: unescapeIcsText(row.description || ''),
       location: unescapeIcsText(row.location || ''),
       url: unescapeIcsText(row.url || ''),
-      all_day: startIsDateOnly || endIsDateOnly,
-      rrule: looksLikeInactivePlaceholder ? null : parseRRule(row.rrule),
-      recurrenceId: parseIcsDate(row.recurrenceId, row.recurrenceIdParams || {}),
-      exdate: looksLikeInactivePlaceholder ? [] : (row.exdate || []).map((item) => parseIcsDate(item, row.startParams || {})).filter(Boolean),
+      rrule: parseRRule(row.rrule),
+      recurrenceId: parseIcsDate(row.recurrenceId),
+      exdate: (row.exdate || []).map(parseIcsDate).filter(Boolean),
       uid: row.uid || `uid_${Math.random().toString(36).slice(2, 10)}`,
     };
     if (!normalized.start || !normalized.end) continue;
@@ -1999,7 +2140,6 @@ function parseIcsFile(text, fallbackTitle) {
       description: item.description,
       location: item.location,
       url: item.url,
-      all_day: Boolean(item.all_day),
       recurrence: null,
       exdates: [],
       overrides: [],
@@ -2016,7 +2156,6 @@ function parseIcsFile(text, fallbackTitle) {
       description: bucket.base.description,
       location: bucket.base.location,
       url: bucket.base.url,
-      all_day: Boolean(bucket.base.all_day),
       recurrence: bucket.base.rrule,
       exdates: bucket.base.exdate,
       overrides: bucket.overrides.map((override) => ({
@@ -2027,7 +2166,6 @@ function parseIcsFile(text, fallbackTitle) {
         description: override.description,
         location: override.location,
         url: override.url,
-        all_day: Boolean(override.all_day),
       })),
     });
   }
@@ -2102,6 +2240,9 @@ async function fetchCalendarEventsFromSource(source) {
   return (parsed.events || []).map((event) => ({
     ...event,
     source_title: source.title || parsed.title || 'Calendar source',
+    source_author_name: source.author_name || source.owner_acct || '',
+    contributor_text: source.contributor_text || '',
+    source_site: source.site_url || window.location.origin || 'https://calendar.time-grid.org',
     timeline_color: source.color || '',
     editable: false,
   }));
@@ -2109,6 +2250,26 @@ async function fetchCalendarEventsFromSource(source) {
 
 async function makeHardCopyFromSubscription(item) {
   throw new Error('Hard copy is currently disabled.');
+}
+
+function readonlyEventDescription(item) {
+  const existing = String(item?.description || '').trim();
+  const timelineTitle = String(item?.source_title || item?.calendar_title || 'TimeGrid timeline').trim();
+  const authorLabel = String(item?.author_name || item?.source_author_name || '').trim();
+  const authorsLabel = String(item?.contributor_text || '').trim();
+  const website = String(item?.source_site || window.location.origin || 'https://calendar.time-grid.org').trim();
+  const parts = [];
+  if (existing) parts.push(existing);
+  parts.push('Shared via TimeGrid.');
+  parts.push('TimeGrid is a calendar workspace for publishing timelines and subscribing to live calendar updates.');
+  parts.push(`Website: ${website}`);
+  if (timelineTitle) parts.push(`Timeline: ${timelineTitle}`);
+  if (authorLabel) {
+    parts.push(`Author: ${authorLabel}`);
+  } else if (authorsLabel) {
+    parts.push(`Authors: ${authorsLabel}`);
+  }
+  return parts.join('\n\n').trim();
 }
 
 async function initReadonlyCalendar(elementId, sources, hintId = '') {
@@ -2134,47 +2295,26 @@ async function initReadonlyCalendar(elementId, sources, hintId = '') {
   }));
   if (token !== state.readonlyLoadToken) return;
   const expanded = expandEventsList(chunks.flat());
-  if (!expanded.length) {
-    el.innerHTML = '<div class="empty">No events could be loaded from the visible sources.</div>';
-    setCalendarHint(hintId, '');
-    return;
-  }
   const focus = calendarFocus(expanded);
   el.innerHTML = '';
   if (window.TimeGridScheduleXCalendar?.mountReadonly) {
-    const mountEvents = (items) => {
-      const localFocus = calendarFocus(items);
-      setCalendarHint(hintId, localFocus.hint);
-      return window.TimeGridScheduleXCalendar.mountReadonly(el, {
-        events: items.map((item) => ({
-          ...item,
-          timeline_color: item.timeline_color || item.source_color || '',
-        })),
-        initialView: localFocus.initialView,
-        selectedDate: (localFocus.selectedDate || preferredCalendarDate()).slice(0, 10),
-        useNativeEventModal: false,
-        onRangeUpdate(range) {
-          setCalendarHint(hintId, calendarGapHint(
-            items,
-            range?.startIso || '',
-            range?.endIso || ''
-          ));
-        },
-        onEventClick(detail) {
-          state.eventDetail = detail;
-          syncEventDetailModal();
-        },
-      });
-    };
-    let mounted = null;
-    try {
-      mounted = mountEvents(expanded);
-    } catch (_error) {
-      const fallbackEvents = stripRecurringEvents(expanded);
-      if (!fallbackEvents.length) throw _error;
-      mounted = mountEvents(fallbackEvents);
-      setCalendarHint(hintId, 'Some source recurrence data was invalid, so TimeGrid loaded a safe fallback view.');
-    }
+    setCalendarHint(hintId, focus.hint);
+    const mounted = window.TimeGridScheduleXCalendar.mountReadonly(el, {
+      events: expanded.map((item) => ({
+        ...item,
+        description: readonlyEventDescription(item),
+        timeline_color: item.timeline_color || item.source_color || '',
+      })),
+      initialView: focus.initialView,
+      selectedDate: (focus.selectedDate || preferredCalendarDate()).slice(0, 10),
+      onRangeUpdate(range) {
+        setCalendarHint(hintId, calendarGapHint(
+          expanded,
+          range?.startIso || '',
+          range?.endIso || ''
+        ));
+      },
+    });
     state.readonlyCalendar = {
       destroy() {
         window.TimeGridScheduleXCalendar?.destroy?.(el);
@@ -2319,19 +2459,18 @@ function renderPublishedEmbed() {
       showToast(error.message || 'Subscribe failed');
     }
   });
-  initReadonlyCalendar('published-embed-calendar', [{ title: item.title, fetch_url: item.feed_url, url: item.feed_url }], 'published-embed-calendar-hint');
+  initReadonlyCalendar('published-embed-calendar', [{ title: item.title, fetch_url: item.feed_url, url: item.feed_url, contributor_text: contributorText, owner_acct: item.owner_acct, site_url: window.location.origin }], 'published-embed-calendar-hint');
 }
 
 function renderPublishedDetail() {
   const item = state.publishedDetail;
   const contributorText = (item.contributors || []).map((entry) => `${entry.name}${entry.count > 1 ? ` (${entry.count})` : ''}`).join(', ');
-  const officialBadge = item.official ? '<span class="auth-provider-badge official-badge">Official</span>' : '';
   root.innerHTML = `
     <div>
       <header class="published-hero">
         <div>
           <div class="eyebrow">Published Calendar</div>
-          <div class="title-with-badge"><h1>${escapeHtml(item.title)}</h1>${officialBadge}</div>
+          <h1>${escapeHtml(item.title)}</h1>
           <p>Published by <a href="/people/${encodeURIComponent(item.owner_acct)}">@${escapeHtml(item.owner_acct)}</a> with ${escapeHtml(item.subscription_count)} subscriptions</p>
           ${contributorText ? `<p>Authors: ${escapeHtml(contributorText)}</p>` : ''}
         </div>
@@ -2358,7 +2497,7 @@ function renderPublishedDetail() {
     </div>`;
   document.querySelectorAll('[data-action="share-bundle"]').forEach((button) => button.addEventListener('click', () => openShareSheet(button.dataset.url, button.dataset.title || '')));
   bindEventDetailActions();
-  initReadonlyCalendar('published-calendar', [{ title: item.title, fetch_url: item.feed_url, url: item.feed_url }], 'published-calendar-hint');
+  initReadonlyCalendar('published-calendar', [{ title: item.title, fetch_url: item.feed_url, url: item.feed_url, contributor_text: contributorText, owner_acct: item.owner_acct, site_url: window.location.origin }], 'published-calendar-hint');
 }
 
 function renderPublished() {
@@ -2380,15 +2519,17 @@ function renderPublished() {
   root.innerHTML = `
     <div class="published-wrap">
       <header class="topbar">
-        <div class="brand">
-          <div class="eyebrow">TimeGrid Calendar</div>
-          <h1>Published calendars</h1>
-          <p>Browse public, invited, or private merged calendars published by TimeGrid users.</p>
+        <div class="topbar-main">
+          <div class="brand">
+            <div class="eyebrow">TimeGrid Calendar</div>
+            <h1>Published calendars</h1>
+            <p>Browse public, invited, or private merged calendars published by TimeGrid users.</p>
+          </div>
+          <div class="topbar-utility">
+            ${state.me?.authenticated ? `<button data-action="logout">Sign out</button>${notificationsButton()}` : `<a class="button primary" href="${loginHref()}">Sign in with Mastodon</a>`}
+          </div>
         </div>
-        <div class="toolbar">
-          <a class="button" href="/people">Community</a>
-          ${state.me?.authenticated ? `<a class="button primary" href="/u/${encodeURIComponent(state.me.acct)}">My page</a><button data-action="logout">Sign out</button>${notificationsButton()}` : `<a class="button primary" href="${loginHref()}">Sign in with Mastodon</a>`}
-        </div>
+        ${sectionNav()}
       </header>
       <section class="main-panel" style="margin-top:20px;">
         ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
@@ -2416,7 +2557,7 @@ function renderPublished() {
             <article class="public-card">
               <header>
                 <div>
-                  <div class="eyebrow">${item.official ? '<span class="auth-provider-badge official-badge">Official</span>' : `<a href="/people/${encodeURIComponent(item.owner_acct)}">@${escapeHtml(item.owner_acct)}</a>`}</div>
+                  <div class="eyebrow"><a href="/people/${encodeURIComponent(item.owner_acct)}">@${escapeHtml(item.owner_acct)}</a></div>
                   <strong>${escapeHtml(item.title)}</strong>
                   <div class="muted">${escapeHtml(item.subscription_count)} subscriptions</div>
                   <div class="muted">${escapeHtml(labels[item.visibility] || 'Public')}</div>
@@ -2459,6 +2600,23 @@ function renderPublished() {
       ${notificationsModal()}
       ${eventDetailModal()}
     </div>`;
+  const officialRegistryMode = isOfficialRegistryMode();
+  if (officialRegistryMode) {
+    const grid = root.querySelector('.grid');
+    const main = root.querySelector('.main-panel');
+    if (grid && main) {
+      root.querySelector('.sidebar')?.remove();
+      grid.classList.add('official-registry-layout');
+      main.innerHTML = `
+        <div class="calendar-stage">
+          ${mastodonProvisioningBanner()}
+          ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
+          ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
+          ${officialRegistryTableMarkup()}
+        </div>`;
+    }
+  }
+
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   bindNoticeActions(renderPublished);
   bindEventDetailActions();
@@ -2506,15 +2664,17 @@ function renderCommunity() {
   root.innerHTML = `
     <div class="published-wrap">
       <header class="topbar">
-        <div class="brand">
-          <div class="eyebrow">TimeGrid Community</div>
-          <h1>People and their published calendars</h1>
-          <p>Discover creators, open their profile pages, and browse what they have published.</p>
+        <div class="topbar-main">
+          <div class="brand">
+            <div class="eyebrow">TimeGrid Community</div>
+            <h1>People and their published calendars</h1>
+            <p>Discover creators, open their profile pages, and browse what they have published.</p>
+          </div>
+          <div class="topbar-utility">
+            ${state.me?.authenticated ? `<button data-action="logout">Sign out</button>${notificationsButton()}` : `<a class="button primary" href="${loginHref()}">Sign in with Mastodon</a>`}
+          </div>
         </div>
-        <div class="toolbar">
-          <a class="button" href="/published">Published calendars</a>
-          ${state.me?.authenticated ? `<a class="button primary" href="/u/${encodeURIComponent(state.me.acct)}">My page</a><button data-action="logout">Sign out</button>${notificationsButton()}` : `<a class="button primary" href="${loginHref()}">Sign in with Mastodon</a>`}
-        </div>
+        ${sectionNav()}
       </header>
       <section class="main-panel" style="margin-top:20px;">
         <div class="published-search-row">
@@ -2541,6 +2701,23 @@ function renderCommunity() {
       </section>
       ${notificationsModal()}
     </div>`;
+  const officialRegistryMode = isOfficialRegistryMode();
+  if (officialRegistryMode) {
+    const grid = root.querySelector('.grid');
+    const main = root.querySelector('.main-panel');
+    if (grid && main) {
+      root.querySelector('.sidebar')?.remove();
+      grid.classList.add('official-registry-layout');
+      main.innerHTML = `
+        <div class="calendar-stage">
+          ${mastodonProvisioningBanner()}
+          ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
+          ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
+          ${officialRegistryTableMarkup()}
+        </div>`;
+    }
+  }
+
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   bindNoticeActions(renderCommunity);
   const searchInput = document.querySelector('[data-action="community-search-input"]');
@@ -2562,17 +2739,18 @@ function renderCommunityProfile() {
   root.innerHTML = `
     <div class="published-wrap">
       <header class="topbar">
-        <div class="brand">
-          <div class="eyebrow">Creator profile</div>
-          <h1>${escapeHtml(item.display_name || item.acct)}</h1>
-          <p>@${escapeHtml(item.acct)}</p>
-          ${item.bio ? `<p>${escapeHtml(item.bio)}</p>` : ''}
+        <div class="topbar-main">
+          <div class="brand">
+            <div class="eyebrow">Creator profile</div>
+            <h1>${escapeHtml(item.display_name || item.acct)}</h1>
+            <p>@${escapeHtml(item.acct)}</p>
+            ${item.bio ? `<p>${escapeHtml(item.bio)}</p>` : ''}
+          </div>
+          <div class="topbar-utility">
+            ${state.me?.authenticated ? notificationsButton() : ''}
+          </div>
         </div>
-        <div class="toolbar">
-          <a class="button" href="/people">Back to community</a>
-          <a class="button" href="/published">Published calendars</a>
-          ${state.me?.authenticated ? notificationsButton() : ''}
-        </div>
+        ${sectionNav()}
       </header>
       <section class="main-panel" style="margin-top:20px;">
         <div class="section-header">
@@ -2598,6 +2776,11 @@ document.addEventListener('keydown', (event) => {
   }
   if (state.publishOpen) {
     state.publishOpen = false;
+    render();
+    return;
+  }
+  if (state.exportOpen) {
+    state.exportOpen = false;
     render();
     return;
   }

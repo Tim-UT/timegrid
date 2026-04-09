@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import base64
+import calendar as pycalendar
+import csv
 import hashlib
 import html
 import json
@@ -12,10 +14,11 @@ import secrets
 import tempfile
 import time
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +65,7 @@ def asset_href(path: str, source: Path) -> str:
     except OSError:
         version = 1
     return f'{path}?v={version}'
-ICON = Path('/var/www/calendar/timegrids-icon.png')
+ICON = BASE_DIR / 'timegrids-icon.png'
 
 
 def ensure_store() -> None:
@@ -78,6 +81,7 @@ def load_store() -> dict[str, Any]:
     data.setdefault('users', {})
     data.setdefault('published', {})
     data.setdefault('signup_intents', [])
+    data.setdefault('exports', {})
     if ensure_official_content(data):
         save_store(data)
     return data
@@ -1694,7 +1698,7 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
             archived_published.append(serialize_bundle(bundle, store, session, user))
 
     official_registry_rows = []
-    if mode == 'personal' and acct == OFFICIAL_ACCT and is_admin:
+    if mode == 'creator' and acct == OFFICIAL_ACCT and is_admin:
         official_registry_rows = [serialize_subscription(acct, item, user, store, session) for item in user.get('subscriptions', []) if item.get('official') and item.get('kind') != 'bundle' and not item.get('trashed') and not item.get('detached')]
 
     return {
@@ -1917,6 +1921,456 @@ def timeline_to_ics(acct: str, timeline: dict[str, Any]) -> bytes:
             lines.append('END:VEVENT')
     lines.append('END:VCALENDAR')
     return ('\r\n'.join(lines) + '\r\n').encode('utf-8')
+
+
+
+
+def personal_export_title(user: dict[str, Any], acct: str) -> str:
+    return f"{user.get('display_name') or acct} personal calendar"
+
+
+def collect_personal_export_sources(acct: str, user: dict[str, Any], store: dict[str, Any]) -> list[dict[str, Any]]:
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_source(source_item: dict[str, Any], color_override: str = '') -> None:
+        runtime_url = subscription_runtime_url(acct, user, source_item, store)
+        if not runtime_url or runtime_url in seen:
+            return
+        seen.add(runtime_url)
+        sources.append({
+            'id': source_item.get('id') or '',
+            'title': source_item.get('title') or runtime_url or 'Calendar source',
+            'url': runtime_url,
+            'color': color_override or source_item.get('color') or '',
+            'author_name': source_item.get('author_name') or user.get('display_name') or acct,
+            'author_acct': source_item.get('author_acct') or acct,
+        })
+
+    for item in user.get('subscriptions', []):
+        if not personal_membership_visible(item) or item.get('trashed') or not item.get('visible') or item.get('grouped_in'):
+            continue
+        if item.get('kind') == 'bundle':
+            bundle_color = item.get('color') or ''
+            for child in leaf_subscriptions(user, item):
+                if child.get('trashed'):
+                    continue
+                add_source(child, bundle_color)
+        else:
+            add_source(item)
+    return sources
+
+
+def personal_export_metadata(acct: str, user: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:
+    authors: list[str] = []
+    timelines: list[str] = []
+    for item in sources:
+        author_label = item.get('author_name') or item.get('author_acct') or acct
+        if author_label and author_label not in authors:
+            authors.append(author_label)
+        title = item.get('title') or item.get('url') or 'Calendar source'
+        if title and title not in timelines:
+            timelines.append(title)
+    return {
+        'title': personal_export_title(user, acct),
+        'authors': authors,
+        'timelines': timelines,
+        'website_name': 'TimeGrid Calendar',
+        'website_url': APP_BASE_URL,
+        'owner_acct': acct,
+        'owner_name': user.get('display_name') or acct,
+    }
+
+
+def build_personal_export_snapshot(acct: str, user: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
+    sources = collect_personal_export_sources(acct, user, store)
+    metadata = personal_export_metadata(acct, user, sources)
+    urls = [item.get('url') or '' for item in sources if item.get('url')]
+    title = metadata['title']
+    desc = f"Visible personal TimeGrid calendar for @{acct} from {APP_BASE_URL}. Authors: {', '.join(metadata['authors']) or metadata['owner_name']}"
+    ics_bytes = merged_calendar_bytes(urls, title, desc, '-//TimeGrid//Personal Export//EN')
+    return {
+        'sources': sources,
+        'urls': urls,
+        'metadata': metadata,
+        'ics_bytes': ics_bytes,
+        'ics_text': ics_bytes.decode('utf-8'),
+    }
+
+
+def export_token_url(token: str) -> str:
+    return f'{APP_BASE_URL}/export/{token}.ics'
+
+
+def ensure_export_record(store: dict[str, Any], acct: str, *, mode: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    exports = store.setdefault('exports', {})
+    if mode == 'dynamic':
+        for token, record in exports.items():
+            if record.get('acct') == acct and record.get('kind') == 'dynamic':
+                record['updated_at'] = now_iso()
+                return {'token': token, 'record': record}
+        token = new_id('exp')
+        record = {
+            'acct': acct,
+            'kind': 'dynamic',
+            'created_at': now_iso(),
+            'updated_at': now_iso(),
+        }
+        exports[token] = record
+        return {'token': token, 'record': record}
+    token = new_id('exp')
+    snapshot = snapshot or {}
+    record = {
+        'acct': acct,
+        'kind': 'static',
+        'created_at': now_iso(),
+        'updated_at': now_iso(),
+        'title': snapshot.get('metadata', {}).get('title') or acct,
+        'authors': list(snapshot.get('metadata', {}).get('authors') or []),
+        'timelines': list(snapshot.get('metadata', {}).get('timelines') or []),
+        'ics_text': snapshot.get('ics_text') or '',
+    }
+    exports[token] = record
+    return {'token': token, 'record': record}
+
+
+def folded_ics_lines(raw_text: str) -> list[str]:
+    lines = str(raw_text or '').replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    out: list[str] = []
+    for line in lines:
+        if not line:
+            if out:
+                out.append('')
+            continue
+        if line.startswith((' ', '\t')) and out:
+            out[-1] += line[1:]
+        else:
+            out.append(line)
+    return out
+
+
+def unescape_ics_text(value: str) -> str:
+    return str(value or '').replace('\\n', '\n').replace('\\,', ',').replace('\\;', ';').replace('\\\\', '\\')
+
+
+def parse_ics_value(raw: str) -> tuple[datetime | None, bool]:
+    value = str(raw or '').strip()
+    if not value:
+        return None, False
+    if 'T' in value:
+        cleaned = value.replace('Z', '+00:00') if value.endswith('Z') else value
+        try:
+            dt = datetime.fromisoformat(cleaned)
+        except ValueError:
+            try:
+                dt = datetime.strptime(value, '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+            except ValueError:
+                return None, False
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc), False
+    try:
+        dt = datetime.strptime(value[:8], '%Y%m%d').replace(tzinfo=timezone.utc)
+        return dt, True
+    except ValueError:
+        return None, False
+
+
+def parse_ics_events(raw_text: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in folded_ics_lines(raw_text):
+        upper = line.upper()
+        if upper == 'BEGIN:VEVENT':
+            current = {}
+            continue
+        if upper == 'END:VEVENT':
+            if current is not None:
+                start_dt, all_day = parse_ics_value(current.get('DTSTART', ''))
+                end_dt, _ = parse_ics_value(current.get('DTEND', ''))
+                if start_dt is not None:
+                    if end_dt is None:
+                        end_dt = start_dt + timedelta(days=1 if all_day else 0, hours=0 if all_day else 1)
+                    events.append({
+                        'uid': current.get('UID', ''),
+                        'title': unescape_ics_text(current.get('SUMMARY', '') or 'Untitled event'),
+                        'start': start_dt,
+                        'end': end_dt,
+                        'all_day': all_day,
+                        'description': unescape_ics_text(current.get('DESCRIPTION', '')),
+                        'location': unescape_ics_text(current.get('LOCATION', '')),
+                        'url': unescape_ics_text(current.get('URL', '')),
+                    })
+            current = None
+            continue
+        if current is None or ':' not in line:
+            continue
+        left, value = line.split(':', 1)
+        key = left.split(';', 1)[0].upper()
+        if key in {'UID', 'SUMMARY', 'DTSTART', 'DTEND', 'DESCRIPTION', 'LOCATION', 'URL'}:
+            current[key] = value
+    events.sort(key=lambda item: (item['start'], item['title']))
+    return events
+
+
+def export_csv_bytes(snapshot: dict[str, Any]) -> bytes:
+    buf = StringIO()
+    writer = csv.writer(buf)
+    meta = snapshot['metadata']
+    writer.writerow(['calendar_title', 'website_name', 'website_url', 'timeline_title', 'timeline_author', 'event_title', 'start_utc', 'end_utc', 'all_day', 'description', 'location', 'event_url'])
+    title_lookup = {item.get('url') or '': item for item in snapshot.get('sources', [])}
+    for url in snapshot.get('urls', []):
+        source_item = title_lookup.get(url, {})
+        try:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            events = parse_ics_events(resp.text)
+        except Exception:
+            events = []
+        for event in events:
+            writer.writerow([
+                meta['title'],
+                meta['website_name'],
+                meta['website_url'],
+                source_item.get('title') or meta['title'],
+                source_item.get('author_name') or meta['owner_name'],
+                event['title'],
+                event['start'].strftime('%Y-%m-%d %H:%M:%S UTC'),
+                event['end'].strftime('%Y-%m-%d %H:%M:%S UTC'),
+                'yes' if event.get('all_day') else 'no',
+                event.get('description') or '',
+                event.get('location') or '',
+                event.get('url') or '',
+            ])
+    return buf.getvalue().encode('utf-8')
+
+
+def pdf_escape(value: str) -> str:
+    return str(value).replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+
+
+def pdf_text_command(x: int, y: int, text_value: str, *, font: str = 'F1', size: int = 12) -> str:
+    return f'BT /{font} {size} Tf 1 0 0 1 {x} {y} Tm ({pdf_escape(text_value)}) Tj ET\n'
+
+
+def pdf_line_command(x1: int, y1: int, x2: int, y2: int) -> str:
+    return f'{x1} {y1} m {x2} {y2} l S\n'
+
+
+def build_simple_pdf(page_specs: list[dict[str, Any]]) -> bytes:
+    objects: list[bytes] = []
+
+    def add_object(payload: bytes) -> int:
+        objects.append(payload)
+        return len(objects)
+
+    font_regular = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+    font_bold = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
+    font_mono = add_object(b'<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>')
+
+    page_object_templates: list[tuple[int, tuple[int, int]]] = []
+    for spec in page_specs:
+        stream = spec['stream'].encode('latin-1', 'replace')
+        content_id = add_object(f"<< /Length {len(stream)} >>\nstream\n".encode('latin-1') + stream + b'endstream')
+        page_object_templates.append((content_id, spec['size']))
+
+    pages_id = len(objects) + len(page_object_templates) + 1
+    page_ids: list[int] = []
+    for content_id, size in page_object_templates:
+        width, height = size
+        payload = f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 {font_regular} 0 R /F2 {font_bold} 0 R /F3 {font_mono} 0 R >> >> /Contents {content_id} 0 R >>".encode('latin-1')
+        page_ids.append(add_object(payload))
+
+    kids = ' '.join(f'{page_id} 0 R' for page_id in page_ids)
+    add_object(f"<< /Type /Pages /Kids [{kids}] /Count {len(page_ids)} >>".encode('latin-1'))
+    catalog_id = add_object(f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode('latin-1'))
+
+    out = bytearray(b'%PDF-1.4\n%\xe2\xe3\xcf\xd3\n')
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out.extend(f'{index} 0 obj\n'.encode('latin-1'))
+        out.extend(obj)
+        out.extend(b'\nendobj\n')
+    xref_start = len(out)
+    out.extend(f'xref\n0 {len(objects) + 1}\n'.encode('latin-1'))
+    out.extend(b'0000000000 65535 f \n')
+    for offset in offsets[1:]:
+        out.extend(f'{offset:010d} 00000 n \n'.encode('latin-1'))
+    out.extend(f'trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\nstartxref\n{xref_start}\n%%EOF'.encode('latin-1'))
+    return bytes(out)
+
+
+def format_export_event(event: dict[str, Any]) -> str:
+    if event.get('all_day'):
+        return f"{event['start'].strftime('%b %d')} all day - {event['title']}"
+    return f"{event['start'].strftime('%b %d %H:%M')} - {event['title']}"
+
+
+def pdf_rect_command(x: int, y: int, width: int, height: int, *, fill_rgb: tuple[float, float, float] | None = None, stroke: bool = True) -> str:
+    out = ''
+    if fill_rgb is not None:
+        r, g, b = fill_rgb
+        out += f'q {r:.3f} {g:.3f} {b:.3f} rg {x} {y} {width} {height} re f Q\n'
+    if stroke:
+        out += f'{x} {y} {width} {height} re S\n'
+    return out
+
+
+def month_matrix(year: int, month: int) -> list[list[int]]:
+    return pycalendar.Calendar(firstweekday=0).monthdayscalendar(year, month)
+
+
+def events_by_date(events: list[dict[str, Any]], year: int | None = None, month: int | None = None) -> dict[date, list[dict[str, Any]]]:
+    buckets: dict[date, list[dict[str, Any]]] = {}
+    for event in events:
+        start_dt = event.get('start')
+        if not isinstance(start_dt, datetime):
+            continue
+        if year is not None and start_dt.year != year:
+            continue
+        if month is not None and start_dt.month != month:
+            continue
+        buckets.setdefault(start_dt.date(), []).append(event)
+    for value in buckets.values():
+        value.sort(key=lambda item: item['start'])
+    return buckets
+
+
+def truncate_text(value: str, limit: int) -> str:
+    text_value = str(value or '').strip()
+    if len(text_value) <= limit:
+        return text_value
+    return text_value[: max(1, limit - 1)].rstrip() + '…'
+
+
+def render_month_grid(stream: str, *, year: int, month: int, x: int, y_top: int, width: int, height: int, events_map: dict[date, list[dict[str, Any]]], compact: bool) -> str:
+    headers = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
+    matrix = month_matrix(year, month)
+    title_y = y_top - 14
+    stream += pdf_text_command(x + 6, title_y, f'{pycalendar.month_name[month]} {year}', font='F2', size=11 if compact else 15)
+    grid_top = y_top - (28 if compact else 34)
+    cell_w = width // 7
+    cell_h = (height - (34 if compact else 44)) // 7
+    for idx, label in enumerate(headers):
+        hx = x + idx * cell_w + 4
+        stream += pdf_text_command(hx, grid_top - 10, label, font='F3', size=7 if compact else 9)
+    grid_y_top = grid_top - 16
+    rows = 6
+    for row in range(rows + 1):
+        yy = grid_y_top - row * cell_h
+        stream += pdf_line_command(x, yy, x + width, yy)
+    for col in range(8):
+        xx = x + col * cell_w
+        stream += pdf_line_command(xx, grid_y_top, xx, grid_y_top - rows * cell_h)
+    for row_index in range(rows):
+        week = matrix[row_index] if row_index < len(matrix) else [0] * 7
+        for col_index, day_num in enumerate(week):
+            if not day_num:
+                continue
+            cell_x = x + col_index * cell_w
+            cell_top = grid_y_top - row_index * cell_h
+            cell_bottom = cell_top - cell_h
+            day_date = date(year, month, day_num)
+            day_events = events_map.get(day_date, [])
+            if day_events:
+                stream += pdf_rect_command(cell_x + 1, cell_bottom + 1, cell_w - 2, cell_h - 2, fill_rgb=(0.91, 0.96, 0.94), stroke=False)
+            stream += pdf_text_command(cell_x + 4, cell_top - 11, str(day_num), font='F2' if day_events else 'F1', size=7 if compact else 9)
+            if compact:
+                if day_events:
+                    stream += pdf_rect_command(cell_x + cell_w - 10, cell_top - 11, 4, 4, fill_rgb=(0.12, 0.44, 0.47), stroke=False)
+                    count_label = str(len(day_events)) if len(day_events) < 10 else '9+'
+                    stream += pdf_text_command(cell_x + cell_w - 19, cell_top - 11, count_label, size=6)
+                continue
+            line_y = cell_top - 24
+            for event in day_events[:3]:
+                prefix = 'All day' if event.get('all_day') else event['start'].strftime('%H:%M')
+                label = truncate_text(f'{prefix} {event.get("title") or "Event"}', 18)
+                stream += pdf_rect_command(cell_x + 4, line_y + 2, 3, 3, fill_rgb=(0.12, 0.44, 0.47), stroke=False)
+                stream += pdf_text_command(cell_x + 10, line_y, label, size=7)
+                line_y -= 10
+            extra = len(day_events) - 3
+            if extra > 0:
+                stream += pdf_text_command(cell_x + 10, cell_bottom + 6, f'+{extra} more', size=7)
+    return stream
+
+
+def render_year_page(year: int, meta: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+    stream = ''
+    stream += pdf_text_command(40, 575, f"{meta['title']} - Year view {year}", font='F2', size=18)
+    stream += pdf_text_command(40, 555, f"TimeGrid Calendar | {meta['website_url']}", size=11)
+    stream += pdf_text_command(40, 539, f"Authors: {', '.join(meta['authors']) or meta['owner_name']}", size=11)
+    stream += pdf_text_command(40, 523, f"Visible timelines: {', '.join(meta['timelines'][:6])}", size=10)
+    yearly_events = events_by_date(events, year)
+    block_w = 220
+    block_h = 95
+    col_x = [40, 286, 532]
+    row_top = [500, 384, 268, 152]
+    month = 1
+    for top in row_top:
+        for x in col_x:
+            stream += pdf_rect_command(x, top - block_h, block_w, block_h, stroke=True)
+            month_events = {day: value for day, value in yearly_events.items() if day.month == month}
+            stream = render_month_grid(stream, year=year, month=month, x=x, y_top=top, width=block_w, height=block_h, events_map=month_events, compact=True)
+            month += 1
+    stream += pdf_text_command(40, 32, f"Events in export: {len([item for item in events if item['start'].year == year])}", size=10)
+    return {'size': (792, 612), 'stream': stream}
+
+
+def render_month_pages(year: int, meta: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pages: list[dict[str, Any]] = []
+    for month in range(1, 13):
+        stream = ''
+        stream += pdf_text_command(40, 760, f"{meta['title']} - {pycalendar.month_name[month]} {year}", font='F2', size=18)
+        stream += pdf_text_command(40, 742, f"TimeGrid Calendar | {meta['website_url']}", size=10)
+        stream += pdf_text_command(40, 728, f"Authors: {', '.join(meta['authors']) or meta['owner_name']}", size=10)
+        month_events = events_by_date(events, year, month)
+        stream = render_month_grid(stream, year=year, month=month, x=40, y_top=700, width=532, height=560, events_map=month_events, compact=False)
+        pages.append({'size': (612, 792), 'stream': stream})
+    return pages
+
+def week_start_dates(year: int) -> list[datetime]:
+    day = datetime(year, 1, 1, tzinfo=timezone.utc)
+    day -= timedelta(days=day.weekday())
+    out: list[datetime] = []
+    while day.year <= year or (day + timedelta(days=6)).year <= year:
+        if day.year == year or (day + timedelta(days=6)).year == year:
+            out.append(day)
+        day += timedelta(days=7)
+    return out
+
+
+def render_week_pages(year: int, meta: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pages: list[dict[str, Any]] = []
+    for week_start in week_start_dates(year):
+        week_end = week_start + timedelta(days=6)
+        label = f"Week of {week_start.strftime('%b %d, %Y')} to {week_end.strftime('%b %d, %Y')}"
+        stream = ''
+        stream += pdf_text_command(40, 760, f"{meta['title']} - {label}", font='F2', size=17)
+        stream += pdf_text_command(40, 742, f"TimeGrid Calendar | {meta['website_url']}", size=10)
+        stream += pdf_text_command(40, 726, f"Authors: {', '.join(meta['authors']) or meta['owner_name']}", size=10)
+        y = 690
+        week_events = [item for item in events if week_start.date() <= item['start'].date() <= week_end.date()]
+        if not week_events:
+            stream += pdf_text_command(40, y, 'No events in this week.', size=11)
+        else:
+            for event in week_events[:42]:
+                stream += pdf_text_command(40, y, format_export_event(event), size=11)
+                y -= 14
+        pages.append({'size': (612, 792), 'stream': stream})
+    return pages
+
+
+def export_pdf_bytes(snapshot: dict[str, Any], year: int, view: str) -> bytes:
+    events = parse_ics_events(snapshot.get('ics_text') or '')
+    meta = snapshot['metadata']
+    if view == 'week':
+        pages = render_week_pages(year, meta, events)
+    elif view == 'month':
+        pages = render_month_pages(year, meta, events)
+    else:
+        pages = [render_year_page(year, meta, events)]
+    return build_simple_pdf(pages)
 
 
 def calendar_head() -> str:
@@ -2421,6 +2875,32 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+
+
+        if path.startswith('/export/') and path.endswith('.ics'):
+            token = path[len('/export/'): -4]
+            store = load_store()
+            record = store.get('exports', {}).get(token)
+            if not record:
+                self.send_json(404, {'error': 'not_found'})
+                return
+            acct = str(record.get('acct') or '').strip()
+            if not acct:
+                self.send_json(404, {'error': 'not_found'})
+                return
+            if record.get('kind') == 'dynamic':
+                user = ensure_user(store, acct)
+                snapshot = build_personal_export_snapshot(acct, user, store)
+                body = snapshot['ics_bytes']
+                filename = f"{slugify(snapshot['metadata']['title']) or acct}-dynamic.ics"
+                cache_headers = {'Cache-Control': 'no-store'}
+            else:
+                body = str(record.get('ics_text') or '').encode('utf-8')
+                title = str(record.get('title') or acct)
+                filename = f"{slugify(title) or acct}-static.ics"
+                cache_headers = {'Cache-Control': 'public, max-age=31536000, immutable'}
+            self.send_bytes(200, body, 'text/calendar; charset=utf-8', {'Content-Disposition': f'inline; filename="{filename}"', **cache_headers})
+            return
 
         if path == '/health':
             self.send_json(200, {'ok': True})
@@ -3007,6 +3487,39 @@ class Handler(BaseHTTPRequestHandler):
                 content_type = resp.headers.get('Content-Type') or 'text/calendar; charset=utf-8'
                 self.send_bytes(200, resp.text.encode('utf-8'), content_type)
                 return
+            if len(parts) == 5 and parts[3] == 'exports' and parts[4].startswith('current.'):
+                snapshot = build_personal_export_snapshot(acct, user, store)
+                ext = parts[4].split('.', 1)[1].lower()
+                if ext == 'ics':
+                    filename = f'{acct}-timegrid-export.ics'
+                    self.send_bytes(200, snapshot['ics_bytes'], 'text/calendar; charset=utf-8', headers={
+                        'Content-Disposition': f'attachment; filename="{filename}"',
+                        'Cache-Control': 'no-store',
+                    })
+                    return
+                if ext == 'csv':
+                    filename = f'{acct}-timegrid-export.csv'
+                    self.send_bytes(200, export_csv_bytes(snapshot), 'text/csv; charset=utf-8', headers={
+                        'Content-Disposition': f'attachment; filename="{filename}"',
+                        'Cache-Control': 'no-store',
+                    })
+                    return
+                if ext == 'pdf':
+                    view = (query.get('view', ['year'])[0] or 'year').strip().lower()
+                    if view not in {'year', 'month', 'week'}:
+                        view = 'year'
+                    try:
+                        year = int((query.get('year', [str(datetime.now(timezone.utc).year)])[0] or '').strip())
+                    except ValueError:
+                        year = datetime.now(timezone.utc).year
+                    filename = f'{acct}-timegrid-export-{view}-{year}.pdf'
+                    self.send_bytes(200, export_pdf_bytes(snapshot, year, view), 'application/pdf', headers={
+                        'Content-Disposition': f'attachment; filename="{filename}"',
+                        'Cache-Control': 'no-store',
+                    })
+                    return
+                self.send_json(404, {'error': 'not_found'})
+                return
             if len(parts) == 5 and parts[3] == 'timelines':
                 timeline = find_timeline(user, parts[4])
                 if not timeline:
@@ -3160,6 +3673,24 @@ class Handler(BaseHTTPRequestHandler):
             store = load_store()
             user = ensure_user(store, acct)
 
+
+            if parts[3] == 'exports' and len(parts) == 4:
+                mode = str(body.get('mode') or 'dynamic').strip().lower()
+                if mode not in {'dynamic', 'static'}:
+                    self.send_json(400, {'error': 'invalid_export_mode'})
+                    return
+                snapshot = build_personal_export_snapshot(acct, user, store)
+                token_info = ensure_export_record(store, acct, mode=mode, snapshot=snapshot)
+                user['updated_at'] = now_iso()
+                save_store(store)
+                self.send_json(200, {
+                    'ok': True,
+                    'mode': mode,
+                    'recommended': 'dynamic',
+                    'url': export_token_url(token_info['token']),
+                    'title': snapshot['metadata']['title'],
+                })
+                return
             if parts[3] == 'subscriptions' and len(parts) == 4:
                 url = str(body.get('url', '')).strip()
                 title = str(body.get('title', '')).strip() or url
@@ -3666,7 +4197,7 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     ensure_store()
     load_auth_state()
-    server = HTTPServer(('127.0.0.1', PORT), Handler)
+    server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     print(f'Listening on http://127.0.0.1:{PORT}')
     server.serve_forever()
 

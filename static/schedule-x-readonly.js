@@ -11624,7 +11624,15 @@ var TimeGridScheduleXCalendar = (() => {
     const calendarEvent = y4(null);
     const calendarEventDOMRect = y4(null);
     const calendarEventElement = y4(null);
+    let teardownGlobalListeners = null;
+    const detachGlobalListeners = () => {
+      if (typeof teardownGlobalListeners === "function") {
+        teardownGlobalListeners();
+        teardownGlobalListeners = null;
+      }
+    };
     const close = () => {
+      detachGlobalListeners();
       calendarEvent.value = null;
       calendarEventDOMRect.value = null;
       calendarEventElement.value = null;
@@ -11632,6 +11640,34 @@ var TimeGridScheduleXCalendar = (() => {
     const setCalendarEvent = (event, eventTargetDOMRect) => {
       calendarEvent.value = event;
       calendarEventDOMRect.value = eventTargetDOMRect;
+      detachGlobalListeners();
+      const arm = () => {
+        if (!calendarEvent.value) return;
+        const handleDocumentClick = (clickEvent) => {
+          const target = clickEvent == null ? void 0 : clickEvent.target;
+          if (!(target instanceof HTMLElement)) {
+            close();
+            return;
+          }
+          if (target.closest('.sx__event-modal')) return;
+          if (target.closest('.sx__event')) return;
+          close();
+        };
+        const handleViewportChange = () => close();
+        document.addEventListener("click", handleDocumentClick, true);
+        window.addEventListener("scroll", handleViewportChange, true);
+        window.addEventListener("resize", handleViewportChange, true);
+        teardownGlobalListeners = () => {
+          document.removeEventListener("click", handleDocumentClick, true);
+          window.removeEventListener("scroll", handleViewportChange, true);
+          window.removeEventListener("resize", handleViewportChange, true);
+        };
+      };
+      if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+        window.setTimeout(arm, 0);
+      } else {
+        arm();
+      }
     };
     const ComponentFn = ({ $app }) => {
       const event = calendarEvent.value;

@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/calendar_app
-EnvironmentFile=/opt/calendar_app/.env
-ExecStart=/usr/bin/python3 /opt/calendar_app/app.py
+WorkingDirectory=/opt/timegrid
+EnvironmentFile=/opt/timegrid/.env
+ExecStart=/opt/timegrid/.venv/bin/python /opt/timegrid/app.py
 Restart=always
 RestartSec=3
 

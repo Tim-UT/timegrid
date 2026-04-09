@@ -123,9 +123,13 @@
     };
 
     repeatSelect?.addEventListener('change', () => {
+      const selected = selectedSeriesEvent();
+      const shouldRerender = !!(selected?.recurrence?.freq && !state.selectedOccurrence && repeatSelect.value === 'none');
       syncRepeatUntil();
       syncRecurrenceConversionState();
-      rerenderEditor();
+      if (shouldRerender) {
+        rerenderEditor();
+      }
     });
     startInput?.addEventListener('change', syncEndAfterStart);
     endInput?.addEventListener('change', () => {
