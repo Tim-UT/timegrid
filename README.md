@@ -67,3 +67,10 @@ sudo systemctl enable --now timegrid-calendar.service
 ## Reverse proxy
 
 Proxy your public domain to `127.0.0.1:9100` and keep TLS termination at the proxy.
+
+## Repository layout
+
+- `app.py`, `static/`, `data/`: TimeGrid calendar application
+- `mastodon/`: Mastodon codebase kept in the same repository for the social server component
+- `deploy/`: example deployment configuration for reverse proxy and services
+

@@ -1,0 +1,13 @@
+calendar.example.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:9100
+}
+
+social.example.com {
+    encode gzip
+
+    @stream path /api/v1/streaming/*
+    reverse_proxy @stream 127.0.0.1:4000
+
+    reverse_proxy 127.0.0.1:3000
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=TimeGrid calendar app
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/timegrid
+EnvironmentFile=/opt/timegrid/.env
+ExecStart=/opt/timegrid/.venv/bin/python /opt/timegrid/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

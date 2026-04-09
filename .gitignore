@@ -12,3 +12,10 @@ __pycache__/
 server.log
 .venv/
 venv/
+
+mastodon/.env.production
+mastodon/.env.production.local
+mastodon/public/system/
+mastodon/storage/
+mastodon/log/
+mastodon/tmp/
