@@ -8,6 +8,8 @@ __pycache__/
 ._*
 *.bak.*
 /data/*.json
+/data/browser-*.png
+/data/server-backups/
 !/data/.gitkeep
 server.log
 .venv/
@@ -19,3 +21,5 @@ mastodon/public/system/
 mastodon/storage/
 mastodon/log/
 mastodon/tmp/
+
+supabase/.temp/

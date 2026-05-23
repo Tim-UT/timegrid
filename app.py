@@ -24,6 +24,8 @@ from typing import Any
 
 import requests
 
+from timegrid_storage import SupabaseStorage, use_supabase_storage
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / 'static'
 DATA_DIR = BASE_DIR / 'data'
@@ -34,6 +36,9 @@ APP_BASE_URL = os.environ.get('APP_BASE_URL', 'https://calendar.time-grid.org').
 MASTODON_BASE_URL = os.environ.get('MASTODON_BASE_URL', 'https://social.time-grid.org').rstrip('/')
 MASTODON_CLIENT_ID = os.environ['MASTODON_CLIENT_ID']
 MASTODON_CLIENT_SECRET = os.environ['MASTODON_CLIENT_SECRET']
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
+SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY', '').strip()
+ENABLE_TEST_LOGIN = os.environ.get('TIMEGRID_ENABLE_TEST_LOGIN', '').strip().lower() in {'1', 'true', 'yes'}
 ADMIN_ACCOUNTS = {x.strip().lower() for x in os.environ.get('ADMIN_ACCOUNTS', '').split(',') if x.strip()}
 OFFICIAL_ACCT = 'official'
 OFFICIAL_CONTAINER_TITLE = 'Official sources'
@@ -48,6 +53,8 @@ PORT = int(os.environ.get('PORT', '9100'))
 pending_auth: dict[str, dict[str, Any]] = {}
 sessions: dict[str, dict[str, Any]] = {}
 OIDC_DISCOVERY_CACHE: dict[str, dict[str, Any]] = {}
+SUPABASE_AUTH_SETTINGS_CACHE: dict[str, Any] = {'loaded_at': 0.0, 'settings': {}}
+STORAGE = SupabaseStorage() if use_supabase_storage() else None
 
 APP_JS = STATIC_DIR / 'app.js'
 SCHEDULE_X_FRAME_JS = STATIC_DIR / 'schedule-x-frame.js'
@@ -75,6 +82,15 @@ def ensure_store() -> None:
 
 
 def load_store() -> dict[str, Any]:
+    if STORAGE is not None:
+        data = STORAGE.load_store()
+        data.setdefault('users', {})
+        data.setdefault('published', {})
+        data.setdefault('signup_intents', [])
+        data.setdefault('exports', {})
+        if ensure_official_content(data):
+            save_store(data)
+        return data
     ensure_store()
     with DATA_FILE.open('r', encoding='utf-8') as fh:
         data = json.load(fh)
@@ -88,6 +104,9 @@ def load_store() -> dict[str, Any]:
 
 
 def save_store(data: dict[str, Any]) -> None:
+    if STORAGE is not None:
+        STORAGE.save_store(data)
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False, dir=DATA_DIR) as tmp:
         json.dump(data, tmp, ensure_ascii=True, indent=2)
@@ -108,6 +127,8 @@ def write_json_file(path: Path, payload: dict[str, Any]) -> None:
 
 
 def ensure_auth_state() -> None:
+    if STORAGE is not None:
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not AUTH_STATE_FILE.exists():
         write_json_file(AUTH_STATE_FILE, {'pending_auth': {}, 'sessions': {}})
@@ -132,6 +153,13 @@ def prune_auth_state(now_ts: float | None = None) -> bool:
 
 def load_auth_state() -> None:
     global pending_auth, sessions
+    if STORAGE is not None:
+        data = STORAGE.load_auth_state()
+        pending_auth = data.get('pending_auth', {})
+        sessions = data.get('sessions', {})
+        if prune_auth_state():
+            save_auth_state()
+        return
     ensure_auth_state()
     with AUTH_STATE_FILE.open('r', encoding='utf-8') as fh:
         data = json.load(fh)
@@ -142,6 +170,10 @@ def load_auth_state() -> None:
 
 
 def save_auth_state() -> None:
+    if STORAGE is not None:
+        prune_auth_state()
+        STORAGE.save_auth_state(pending_auth, sessions)
+        return
     ensure_auth_state()
     prune_auth_state()
     write_json_file(AUTH_STATE_FILE, {'pending_auth': pending_auth, 'sessions': sessions})
@@ -173,6 +205,49 @@ def hash_password(password: str, salt: str | None = None) -> dict[str, str]:
 
 def env_value(name: str) -> str:
     return str(os.environ.get(name) or '').strip()
+
+
+def supabase_auth_enabled() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_ANON_KEY)
+
+
+def supabase_auth_headers(access_token: str = '') -> dict[str, str]:
+    token = access_token or SUPABASE_ANON_KEY
+    return {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    }
+
+
+def supabase_auth_settings() -> dict[str, Any]:
+    if not supabase_auth_enabled():
+        return {}
+    loaded_at = float(SUPABASE_AUTH_SETTINGS_CACHE.get('loaded_at') or 0)
+    cached = SUPABASE_AUTH_SETTINGS_CACHE.get('settings') or {}
+    if cached and time.time() - loaded_at < 300:
+        return cached
+    try:
+        resp = requests.get(
+            f'{SUPABASE_URL}/auth/v1/settings',
+            headers=supabase_auth_headers(),
+            timeout=10,
+        )
+        resp.raise_for_status()
+        settings = resp.json()
+    except Exception:
+        settings = {}
+    SUPABASE_AUTH_SETTINGS_CACHE['loaded_at'] = time.time()
+    SUPABASE_AUTH_SETTINGS_CACHE['settings'] = settings
+    return settings
+
+
+def supabase_provider_enabled(provider_id: str) -> bool:
+    settings = supabase_auth_settings()
+    external = settings.get('external') if isinstance(settings, dict) else {}
+    if not isinstance(external, dict):
+        return False
+    return bool(external.get(provider_id))
 
 
 def decode_jwt_payload(token: str) -> dict[str, Any]:
@@ -269,7 +344,42 @@ def configured_auth_providers() -> list[dict[str, Any]]:
             'provisions_mastodon': True,
         },
     ]
+    if supabase_auth_enabled():
+        settings = supabase_auth_settings()
+        external = settings.get('external') if isinstance(settings, dict) else {}
+        email_enabled = not external or bool(external.get('email'))
+        if email_enabled:
+            providers.append({
+                'id': 'email',
+                'label': 'Email',
+                'description': 'Sign up or sign in with email and password.',
+                'status': 'active',
+                'provisions_mastodon': False,
+                'native_email_auth': True,
+            })
+        google_enabled = supabase_provider_enabled('google')
+        apple_enabled = supabase_provider_enabled('apple')
+        providers.extend([
+            {
+                'id': 'google',
+                'label': 'Google',
+                'description': 'Continue with your Google account through Supabase Auth.' if google_enabled else 'Google sign-in is wired in TimeGrid but not enabled in Supabase yet.',
+                'status': 'active' if google_enabled else 'setup_required',
+                'provisions_mastodon': False,
+                'supabase_provider': True,
+            },
+            {
+                'id': 'apple',
+                'label': 'Apple',
+                'description': 'Continue with your Apple account through Supabase Auth.' if apple_enabled else 'Apple sign-in is wired in TimeGrid but not enabled in Supabase yet.',
+                'status': 'active' if apple_enabled else 'setup_required',
+                'provisions_mastodon': False,
+                'supabase_provider': True,
+            },
+        ])
     for provider_id in ('google', 'apple', 'uoft'):
+        if supabase_auth_enabled() and provider_id in {'google', 'apple'}:
+            continue
         config = external_provider_config(provider_id)
         if not config:
             continue
@@ -426,6 +536,67 @@ def pick_merge_color(items: list[dict[str, Any]]) -> str:
     return random.choice(pool) if pool else random_timeline_color()
 
 
+def default_calendar_id(acct: str, workspace: str) -> str:
+    base = slugify(acct)
+    return f'cal_{base}_{workspace}'
+
+
+def calendar_workspace(item: dict[str, Any] | None) -> str:
+    workspace = str((item or {}).get('workspace') or '').strip().lower()
+    if workspace == 'creator':
+        return 'creator'
+    return 'personal'
+
+
+def default_calendar_record(acct: str, workspace: str) -> dict[str, Any]:
+    return {
+        'id': default_calendar_id(acct, workspace),
+        'workspace': workspace,
+        'title': 'Personal' if workspace == 'personal' else 'Creator',
+        'color': '#2f7d80',
+        'position': 0 if workspace == 'personal' else 1,
+        'is_default': True,
+        'archived': False,
+        'created_at': now_iso(),
+        'updated_at': now_iso(),
+    }
+
+
+def ensure_user_calendars(user: dict[str, Any]) -> list[dict[str, Any]]:
+    acct = str(user.get('acct') or '').strip().lower()
+    calendars = user.setdefault('calendars', [])
+    existing = {(item.get('workspace'), item.get('id')) for item in calendars}
+    for workspace in ('personal', 'creator'):
+        default_id = default_calendar_id(acct, workspace)
+        if (workspace, default_id) not in existing and not any(item.get('workspace') == workspace and item.get('is_default') for item in calendars):
+            calendars.append(default_calendar_record(acct, workspace))
+    calendars.sort(key=lambda item: (str(item.get('workspace') or ''), int(item.get('position') or 0), str(item.get('title') or '').lower()))
+    return calendars
+
+
+def default_calendar_for(user: dict[str, Any], workspace: str) -> str:
+    calendars = ensure_user_calendars(user)
+    for item in calendars:
+        if item.get('workspace') == workspace and item.get('is_default') and not item.get('archived'):
+            return str(item.get('id') or '')
+    for item in calendars:
+        if item.get('workspace') == workspace and not item.get('archived'):
+            return str(item.get('id') or '')
+    return default_calendar_id(str(user.get('acct') or ''), workspace)
+
+
+def resolve_calendar_id(user: dict[str, Any], requested: str, workspace: str) -> str:
+    requested = str(requested or '').strip()
+    calendars = ensure_user_calendars(user)
+    if requested and any(item.get('id') == requested and item.get('workspace') == workspace and not item.get('archived') for item in calendars):
+        return requested
+    return default_calendar_for(user, workspace)
+
+
+def calendar_visible(item: dict[str, Any], calendar_id: str) -> bool:
+    return not calendar_id or str(item.get('calendar_id') or '') == calendar_id
+
+
 def default_user(acct: str) -> dict[str, Any]:
     return {
         'user_id': new_id('usr'),
@@ -443,6 +614,7 @@ def default_user(acct: str) -> dict[str, Any]:
         'subscriptions': [],
         'timelines': [],
         'published': [],
+        'calendars': [default_calendar_record(acct, 'personal'), default_calendar_record(acct, 'creator')],
         'updated_at': now_iso(),
     }
 
@@ -463,11 +635,14 @@ def ensure_user(store: dict[str, Any], acct: str) -> dict[str, Any]:
     user.setdefault('mastodon_profile', {'acct': acct, 'provisioned': True})
     user.setdefault('onboarding', {'calendar_ready': True, 'mastodon_ready': True})
     user.setdefault('updated_at', now_iso())
+    ensure_user_calendars(user)
     for item in user.get('subscriptions', []):
         item.setdefault('detached', False)
         if 'workspace' not in item:
             item['workspace'] = 'creator' if item.get('creator_archived') else 'personal'
         item.setdefault('creator_archived', item.get('workspace') == 'archive')
+        if not item.get('calendar_id'):
+            item['calendar_id'] = default_calendar_for(user, calendar_workspace(item))
         ensure_subscription_color(item)
         ensure_subscription_author(user, item)
     for item in user.get('timelines', []):
@@ -475,12 +650,39 @@ def ensure_user(store: dict[str, Any], acct: str) -> dict[str, Any]:
     for item in user.get('timelines', []):
         sub_id = item.get('subscription_id')
         sub = find_subscription(user, sub_id) if sub_id else None
+        if not item.get('calendar_id'):
+            item['calendar_id'] = str((sub or {}).get('calendar_id') or default_calendar_for(user, calendar_workspace(sub)))
         if sub and not item.get('color'):
             item['color'] = ensure_subscription_color(sub)
         elif sub and not sub.get('color') and item.get('color'):
             sub['color'] = item.get('color')
     migrate_merged_groups(user)
     return user
+
+
+def create_test_login_session(acct: str, display_name: str = '', *, role: str = '') -> tuple[str, dict[str, Any], dict[str, Any]]:
+    acct = slugify(str(acct or 'sample1').strip().lower()) or 'sample1'
+    display_name = str(display_name or acct).strip() or acct
+    store = load_store()
+    user = ensure_user(store, acct)
+    user['display_name'] = display_name
+    user['updated_at'] = now_iso()
+    save_store(store)
+    session_id = new_id('sess')
+    session = {
+        'acct': acct,
+        'account_id': '',
+        'display_name': display_name,
+        'avatar': user.get('avatar') or '',
+        'role': role,
+        'created_at': time.time(),
+        'auth_provider': 'test',
+        'access_token': '',
+        'max_age': SESSION_MAX_AGE,
+    }
+    sessions[session_id] = session
+    save_auth_state()
+    return session_id, session, user
 
 
 def linked_identities(user: dict[str, Any]) -> list[dict[str, Any]]:
@@ -579,6 +781,74 @@ def create_session_for_user(user: dict[str, Any], *, provider: str, role: str = 
     sessions[session_id] = session
     save_auth_state()
     return session_id, session
+
+
+def supabase_redirect_url(next_path: str) -> str:
+    return f'{APP_BASE_URL}/auth?next={urllib.parse.quote(next_path or "/", safe="/?=&")}'
+
+
+def supabase_oauth_authorize_url(provider_id: str, next_path: str) -> str:
+    return (
+        f'{SUPABASE_URL}/auth/v1/authorize?provider={urllib.parse.quote(provider_id)}'
+        f'&redirect_to={urllib.parse.quote(supabase_redirect_url(next_path), safe="")}'
+    )
+
+
+def supabase_auth_user(access_token: str) -> dict[str, Any]:
+    if not supabase_auth_enabled():
+        raise RuntimeError('supabase_auth_disabled')
+    resp = requests.get(
+        f'{SUPABASE_URL}/auth/v1/user',
+        headers=supabase_auth_headers(access_token),
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def resolve_or_create_supabase_user(store: dict[str, Any], auth_user: dict[str, Any], provider: str = '') -> dict[str, Any]:
+    metadata = auth_user.get('user_metadata') or {}
+    app_metadata = auth_user.get('app_metadata') or {}
+    identities = auth_user.get('identities') or []
+    provider = provider or str(app_metadata.get('provider') or '')
+    if not provider and identities:
+        provider = str((identities[0] or {}).get('provider') or '')
+    provider = provider or 'email'
+    subject = str(auth_user.get('id') or '')
+    email = str(auth_user.get('email') or metadata.get('email') or '').strip().lower()
+    display_name = str(
+        metadata.get('full_name')
+        or metadata.get('name')
+        or metadata.get('display_name')
+        or (email.split('@', 1)[0] if email else provider)
+    ).strip()
+    avatar = str(metadata.get('avatar_url') or metadata.get('picture') or '')
+    user = resolve_or_create_external_user(
+        store,
+        provider=provider,
+        subject=subject,
+        email=email,
+        display_name=display_name,
+        avatar=avatar,
+        email_verified=bool(auth_user.get('email_confirmed_at') or auth_user.get('confirmed_at') or metadata.get('email_verified')),
+    )
+    user['supabase_user_id'] = subject
+    for identity in linked_identities(user):
+        if identity.get('provider') == provider and identity.get('provider_subject') == subject:
+            identity['supabase_user_id'] = subject
+    return user
+
+
+def create_session_from_supabase_access_token(access_token: str, provider: str = '') -> tuple[str, dict[str, Any], dict[str, Any]]:
+    auth_user = supabase_auth_user(access_token)
+    store = load_store()
+    user = resolve_or_create_supabase_user(store, auth_user, provider=provider)
+    user['updated_at'] = now_iso()
+    save_store(store)
+    session_id, session = create_session_for_user(user, provider=provider or 'supabase')
+    session['access_token'] = access_token
+    save_auth_state()
+    return session_id, session, user
 
 
 def find_subscription(user: dict[str, Any], sub_id: str) -> dict[str, Any] | None:
@@ -1049,11 +1319,16 @@ def serialize_auth_provider(provider: dict[str, Any], next_path: str = '/') -> d
         'status': provider['status'],
         'provisions_mastodon': bool(provider.get('provisions_mastodon')),
         'login_href': (
-            f'/auth/login?next={urllib.parse.quote(next_path, safe="/?=&")}'
-            if provider['id'] == 'mastodon'
-            else f'/auth/provider/{provider["id"]}/login?next={urllib.parse.quote(next_path, safe="/?=&")}'
+            ''
+            if provider.get('native_email_auth') or provider.get('status') != 'active'
+            else (
+                f'/auth/login?next={urllib.parse.quote(next_path, safe="/?=&")}'
+                if provider['id'] == 'mastodon'
+                else f'/auth/provider/{provider["id"]}/login?next={urllib.parse.quote(next_path, safe="/?=&")}'
+            )
         ),
-        'native_email_auth': False,
+        'native_email_auth': bool(provider.get('native_email_auth')),
+        'supabase_provider': bool(provider.get('supabase_provider')),
     }
 
 
@@ -1274,9 +1549,11 @@ def sync_timeline_subscription(acct: str, user: dict[str, Any], timeline: dict[s
             'trashed': False,
             'created_at': timeline.get('created_at') or now_iso(),
             'owned_timeline_id': timeline['id'],
+            'calendar_id': timeline.get('calendar_id') or default_calendar_for(user, 'personal'),
             'color': timeline.get('color') or random_timeline_color(),
             'author_name': user.get('display_name') or acct,
             'author_acct': acct,
+            'workspace': timeline.get('workspace') or 'personal',
         }
         user['subscriptions'].insert(0, sub)
         timeline['subscription_id'] = sub['id']
@@ -1284,6 +1561,7 @@ def sync_timeline_subscription(acct: str, user: dict[str, Any], timeline: dict[s
         sub['title'] = timeline.get('title') or sub.get('title') or 'Untitled timeline'
         sub['url'] = timeline_ics_url(acct, timeline['id'])
         sub['owned_timeline_id'] = timeline['id']
+        sub['calendar_id'] = timeline.get('calendar_id') or sub.get('calendar_id') or default_calendar_for(user, calendar_workspace(sub))
         sub['color'] = timeline.get('color') or sub.get('color') or random_timeline_color()
         sub['author_name'] = sub.get('author_name') or user.get('display_name') or acct
         sub['author_acct'] = sub.get('author_acct') or acct
@@ -1584,10 +1862,14 @@ def bundle_contributors(store: dict[str, Any], bundle: dict[str, Any], viewer_se
     return sorted(counts.values(), key=lambda item: (-int(item.get('count') or 0), str(item.get('name') or '').lower(), str(item.get('acct') or '').lower()))
 
 
-def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, Any], session: dict[str, Any], *, mode: str = 'personal', is_admin: bool = False) -> dict[str, Any]:
+def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, Any], session: dict[str, Any], *, mode: str = 'personal', is_admin: bool = False, calendar_id: str = '') -> dict[str, Any]:
     active = []
     trash = []
     visible_urls: list[str] = []
+    workspace_for_calendars = 'creator' if mode == 'creator' else 'personal'
+    calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace_for_calendars and not item.get('archived')]
+    valid_calendar_ids = {str(item.get('id') or '') for item in calendars}
+    active_calendar_id = calendar_id if calendar_id in valid_calendar_ids else default_calendar_for(user, workspace_for_calendars)
     membership_check = personal_membership_visible
     if mode == 'creator':
         membership_check = creator_membership_visible
@@ -1596,6 +1878,8 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
 
     for item in user.get('subscriptions', []):
         if not membership_check(item):
+            continue
+        if mode != 'archive' and not calendar_visible(item, active_calendar_id):
             continue
         if item.get('trashed'):
             trash.append(serialize_subscription(acct, item, user, store, session))
@@ -1654,6 +1938,8 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
     for item in user.get('subscriptions', []):
         if not membership_check(item) or item.get('trashed') or not item.get('visible'):
             continue
+        if mode != 'archive' and not calendar_visible(item, active_calendar_id):
+            continue
         if item.get('grouped_in'):
             continue
         if item.get('kind') == 'bundle':
@@ -1672,6 +1958,8 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
         for item in user.get('subscriptions', []):
             if item.get('trashed') or item.get('grouped_in') or item.get('detached'):
                 continue
+            if not calendar_visible(item, active_calendar_id):
+                continue
             payload = serialize_subscription(acct, item, user, store, session)
             if item.get('kind') == 'bundle':
                 payload['components'] = [serialize_subscription(acct, child, user, store, session) for child in component_entries(user, item)]
@@ -1684,6 +1972,8 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
         ))
         for item in user.get('published', []):
             bundle = store.get('published', {}).get(item.get('slug')) or item
+            if bundle.get('calendar_id') and bundle.get('calendar_id') != active_calendar_id:
+                continue
             if bundle_owner_detached(bundle):
                 continue
             if bundle_archived(bundle):
@@ -1713,12 +2003,20 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
             'notifications_unread': unread_notification_count(user),
         },
         'workspace': mode,
+        'calendars': calendars,
+        'active_calendar_id': active_calendar_id,
         'subscriptions': active,
         'trash': trash,
         'published': active_published if mode == 'creator' else [],
         'archived_published': archived_published,
         'publish_candidates': publish_candidates,
-        'timelines': [serialize_timeline(acct, item) for item in user.get('timelines', []) if item.get('kind') != 'wrapper' and membership_check(find_subscription(user, item.get('subscription_id', '')) or {})],
+        'timelines': [
+            serialize_timeline(acct, item)
+            for item in user.get('timelines', [])
+            if item.get('kind') != 'wrapper'
+            and membership_check(find_subscription(user, item.get('subscription_id', '')) or {})
+            and (mode == 'archive' or calendar_visible(item, active_calendar_id))
+        ],
         'embed_url': build_embed_url(deduped_visible_urls),
         'visible_sources': visible_sources,
         'official_registry_rows': official_registry_rows,
@@ -1932,7 +2230,7 @@ def personal_export_title(user: dict[str, Any], acct: str) -> str:
     return f"{user.get('display_name') or acct} personal calendar"
 
 
-def collect_personal_export_sources(acct: str, user: dict[str, Any], store: dict[str, Any]) -> list[dict[str, Any]]:
+def collect_personal_export_sources(acct: str, user: dict[str, Any], store: dict[str, Any], *, calendar_id: str = '') -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -1952,6 +2250,8 @@ def collect_personal_export_sources(acct: str, user: dict[str, Any], store: dict
 
     for item in user.get('subscriptions', []):
         if not personal_membership_visible(item) or item.get('trashed') or not item.get('visible') or item.get('grouped_in'):
+            continue
+        if not calendar_visible(item, calendar_id):
             continue
         if item.get('kind') == 'bundle':
             bundle_color = item.get('color') or ''
@@ -1985,9 +2285,11 @@ def personal_export_metadata(acct: str, user: dict[str, Any], sources: list[dict
     }
 
 
-def build_personal_export_snapshot(acct: str, user: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
-    sources = collect_personal_export_sources(acct, user, store)
+def build_personal_export_snapshot(acct: str, user: dict[str, Any], store: dict[str, Any], *, calendar_id: str = '') -> dict[str, Any]:
+    calendar_id = resolve_calendar_id(user, calendar_id, 'personal')
+    sources = collect_personal_export_sources(acct, user, store, calendar_id=calendar_id)
     metadata = personal_export_metadata(acct, user, sources)
+    metadata['calendar_id'] = calendar_id
     urls = [item.get('url') or '' for item in sources if item.get('url')]
     title = metadata['title']
     desc = f"Visible personal TimeGrid calendar for @{acct} from {APP_BASE_URL}. Authors: {', '.join(metadata['authors']) or metadata['owner_name']}"
@@ -2016,17 +2318,18 @@ def dynamic_calendar_headers(body: bytes) -> dict[str, str]:
     }
 
 
-def ensure_export_record(store: dict[str, Any], acct: str, *, mode: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+def ensure_export_record(store: dict[str, Any], acct: str, *, mode: str, snapshot: dict[str, Any] | None = None, calendar_id: str = '') -> dict[str, Any]:
     exports = store.setdefault('exports', {})
     if mode == 'dynamic':
         for token, record in exports.items():
-            if record.get('acct') == acct and record.get('kind') == 'dynamic':
+            if record.get('acct') == acct and record.get('kind') == 'dynamic' and str(record.get('calendar_id') or '') == calendar_id:
                 record['updated_at'] = now_iso()
                 return {'token': token, 'record': record}
         token = new_id('exp')
         record = {
             'acct': acct,
             'kind': 'dynamic',
+            'calendar_id': calendar_id,
             'created_at': now_iso(),
             'updated_at': now_iso(),
         }
@@ -2037,6 +2340,7 @@ def ensure_export_record(store: dict[str, Any], acct: str, *, mode: str, snapsho
     record = {
         'acct': acct,
         'kind': 'static',
+        'calendar_id': calendar_id,
         'created_at': now_iso(),
         'updated_at': now_iso(),
         'title': snapshot.get('metadata', {}).get('title') or acct,
@@ -2699,6 +3003,9 @@ class Handler(BaseHTTPRequestHandler):
         return f'{APP_BASE_URL}/auth/provider/{provider_id}/callback'
 
     def start_external_auth(self, provider_id: str, next_path: str) -> None:
+        if provider_id in {'google', 'apple'} and supabase_auth_enabled():
+            self.redirect(supabase_oauth_authorize_url(provider_id, next_path))
+            return
         config = external_provider_config(provider_id)
         if not config:
             self.redirect(f'/auth?next={urllib.parse.quote(next_path, safe="/?=&")}')
@@ -2801,7 +3108,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header(key, value)
         self.end_headers()
         if self.command != 'HEAD':
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
     def send_json(self, status: int, payload: Any, headers: dict[str, str] | None = None) -> None:
         merged = {'Cache-Control': 'no-store'}
@@ -2904,7 +3214,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if record.get('kind') == 'dynamic':
                 user = ensure_user(store, acct)
-                snapshot = build_personal_export_snapshot(acct, user, store)
+                snapshot = build_personal_export_snapshot(acct, user, store, calendar_id=str(record.get('calendar_id') or ''))
                 body = snapshot['ics_bytes']
                 filename = f"{slugify(snapshot['metadata']['title']) or acct}-dynamic.ics"
                 cache_headers = dynamic_calendar_headers(body)
@@ -2918,6 +3228,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/health':
             self.send_json(200, {'ok': True})
+            return
+        if path == '/api/dev/test-login':
+            if not ENABLE_TEST_LOGIN:
+                self.send_json(404, {'error': 'not_found'})
+                return
+            acct = str(query.get('acct', ['sample1'])[0] or 'sample1')
+            display_name = str(query.get('display_name', [acct])[0] or acct)
+            role = 'admin' if str(query.get('admin', [''])[0]).lower() in {'1', 'true', 'yes'} else ''
+            next_path = str(query.get('next', ['/'])[0] or '/')
+            session_id, _session, user = create_test_login_session(acct, display_name, role=role)
+            self.send_response(302)
+            self.send_header('Location', safe_post_auth_path(next_path, user['acct']))
+            self.send_header('Set-Cookie', make_cookie_header(session_id))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
             return
         if path == '/timegrids-icon.png':
             self.serve_static(ICON)
@@ -3320,6 +3645,7 @@ class Handler(BaseHTTPRequestHandler):
                 'providers': [serialize_auth_provider(provider, next_path) for provider in configured_auth_providers()],
                 'dual_account_model': False,
                 'next': next_path,
+                'supabase_auth_enabled': supabase_auth_enabled(),
             })
             return
         if path == '/api/notifications':
@@ -3455,7 +3781,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             store = load_store()
             user = ensure_user(store, acct)
-            self.send_json(200, build_workspace_payload(acct, user, store, session, mode='creator', is_admin=self.is_admin(session)))
+            self.send_json(200, build_workspace_payload(acct, user, store, session, mode='creator', is_admin=self.is_admin(session), calendar_id=query.get('calendar_id', [''])[0]))
             return
         if path.startswith('/api/archive/'):
             session = self.require_session()
@@ -3471,7 +3797,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             store = load_store()
             user = ensure_user(store, acct)
-            self.send_json(200, build_workspace_payload(acct, user, store, session, mode='archive', is_admin=self.is_admin(session)))
+            self.send_json(200, build_workspace_payload(acct, user, store, session, mode='archive', is_admin=self.is_admin(session), calendar_id=query.get('calendar_id', [''])[0]))
             return
         if path.startswith('/api/personal/'):
             session = self.require_session()
@@ -3488,7 +3814,7 @@ class Handler(BaseHTTPRequestHandler):
             store = load_store()
             user = ensure_user(store, acct)
             if len(parts) == 3:
-                self.send_json(200, build_workspace_payload(acct, user, store, session, mode='personal', is_admin=self.is_admin(session)))
+                self.send_json(200, build_workspace_payload(acct, user, store, session, mode='personal', is_admin=self.is_admin(session), calendar_id=query.get('calendar_id', [''])[0]))
                 return
             if len(parts) == 6 and parts[3] == 'subscriptions' and parts[5] == 'source':
                 item = find_subscription(user, parts[4])
@@ -3505,7 +3831,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_bytes(200, resp.text.encode('utf-8'), content_type)
                 return
             if len(parts) == 5 and parts[3] == 'exports' and parts[4].startswith('current.'):
-                snapshot = build_personal_export_snapshot(acct, user, store)
+                snapshot = build_personal_export_snapshot(acct, user, store, calendar_id=query.get('calendar_id', [''])[0])
                 ext = parts[4].split('.', 1)[1].lower()
                 if ext == 'ics':
                     filename = f'{acct}-timegrid-export.ics'
@@ -3572,11 +3898,121 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/auth/email/signup':
-            self.send_json(403, {'error': 'email_auth_disabled'})
+            if not supabase_auth_enabled():
+                self.send_json(403, {'error': 'supabase_auth_disabled'})
+                return
+            body = self.parse_json_body()
+            email = str(body.get('email') or '').strip().lower()
+            password = str(body.get('password') or '')
+            display_name = str(body.get('display_name') or email.split('@', 1)[0] if email else '').strip()
+            next_path = safe_post_auth_path(str(body.get('next') or '/'), display_name or 'user')
+            if not email or '@' not in email:
+                self.send_json(400, {'error': 'valid email required'})
+                return
+            if len(password) < 8:
+                self.send_json(400, {'error': 'password must be at least 8 characters'})
+                return
+            resp = requests.post(
+                f'{SUPABASE_URL}/auth/v1/signup',
+                headers=supabase_auth_headers(),
+                json={
+                    'email': email,
+                    'password': password,
+                    'data': {'display_name': display_name, 'full_name': display_name},
+                    'redirect_to': supabase_redirect_url(next_path),
+                },
+                timeout=20,
+            )
+            if resp.status_code >= 400:
+                self.send_json(resp.status_code if resp.status_code < 500 else 502, {'error': (resp.json().get('msg') if resp.text else '') or 'signup_failed'})
+                return
+            data = resp.json()
+            session_data = data.get('session') or {}
+            access_token = session_data.get('access_token')
+            if not access_token:
+                self.send_json(200, {'ok': True, 'verification_required': True, 'message': 'Check your email to confirm your account, then sign in.'})
+                return
+            session_id, session, user = create_session_from_supabase_access_token(access_token, provider='email')
+            self.send_json(200, {
+                'ok': True,
+                'user': {'acct': user['acct'], 'display_name': user.get('display_name') or user['acct']},
+                'next': safe_post_auth_path(str(body.get('next') or '/'), user['acct']),
+            }, headers={'Set-Cookie': make_cookie_header(session_id)})
             return
 
         if path == '/api/auth/email/login':
-            self.send_json(403, {'error': 'email_auth_disabled'})
+            if not supabase_auth_enabled():
+                self.send_json(403, {'error': 'supabase_auth_disabled'})
+                return
+            body = self.parse_json_body()
+            email = str(body.get('email') or '').strip().lower()
+            password = str(body.get('password') or '')
+            resp = requests.post(
+                f'{SUPABASE_URL}/auth/v1/token?grant_type=password',
+                headers=supabase_auth_headers(),
+                json={'email': email, 'password': password},
+                timeout=20,
+            )
+            if resp.status_code >= 400:
+                message = 'login_failed'
+                try:
+                    payload = resp.json()
+                    message = payload.get('error_description') or payload.get('msg') or payload.get('error') or message
+                except Exception:
+                    pass
+                self.send_json(401, {'error': message})
+                return
+            data = resp.json()
+            access_token = data.get('access_token')
+            if not access_token:
+                self.send_json(401, {'error': 'login_failed'})
+                return
+            session_id, session, user = create_session_from_supabase_access_token(access_token, provider='email')
+            self.send_json(200, {
+                'ok': True,
+                'user': {'acct': user['acct'], 'display_name': user.get('display_name') or user['acct']},
+                'next': safe_post_auth_path(str(body.get('next') or '/'), user['acct']),
+            }, headers={'Set-Cookie': make_cookie_header(session_id)})
+            return
+
+        if path == '/api/auth/supabase/session':
+            if not supabase_auth_enabled():
+                self.send_json(403, {'error': 'supabase_auth_disabled'})
+                return
+            body = self.parse_json_body()
+            access_token = str(body.get('access_token') or '').strip()
+            provider = str(body.get('provider') or '').strip().lower()
+            if not access_token:
+                self.send_json(400, {'error': 'access_token_required'})
+                return
+            try:
+                session_id, session, user = create_session_from_supabase_access_token(access_token, provider='' if provider in {'', 'supabase', 'oauth'} else provider)
+            except Exception:
+                self.send_json(401, {'error': 'invalid_supabase_session'})
+                return
+            self.send_json(200, {
+                'ok': True,
+                'user': {'acct': user['acct'], 'display_name': user.get('display_name') or user['acct']},
+                'next': safe_post_auth_path(str(body.get('next') or '/'), user['acct']),
+            }, headers={'Set-Cookie': make_cookie_header(session_id)})
+            return
+
+        if path == '/api/dev/test-login':
+            if not ENABLE_TEST_LOGIN:
+                self.send_json(404, {'error': 'not_found'})
+                return
+            body = self.parse_json_body()
+            role = 'admin' if bool(body.get('admin')) else ''
+            session_id, _session, user = create_test_login_session(
+                str(body.get('acct') or 'sample1'),
+                str(body.get('display_name') or ''),
+                role=role,
+            )
+            self.send_json(200, {
+                'ok': True,
+                'user': {'acct': user['acct'], 'display_name': user.get('display_name') or user['acct']},
+                'next': safe_post_auth_path(str(body.get('next') or '/'), user['acct']),
+            }, headers={'Set-Cookie': make_cookie_header(session_id)})
             return
 
         if path == '/api/notifications':
@@ -3717,14 +4153,45 @@ class Handler(BaseHTTPRequestHandler):
             store = load_store()
             user = ensure_user(store, acct)
 
+            if parts[3] == 'calendars' and len(parts) == 4:
+                workspace = str(body.get('workspace') or 'personal').strip().lower()
+                if workspace not in {'personal', 'creator'}:
+                    self.send_json(400, {'error': 'invalid workspace'})
+                    return
+                title = str(body.get('title') or '').strip() or 'New calendar'
+                calendar_id = new_id('cal')
+                existing_titles = {str(item.get('title') or '').strip().lower() for item in ensure_user_calendars(user) if item.get('workspace') == workspace and not item.get('archived')}
+                base_title = title
+                counter = 2
+                while title.lower() in existing_titles:
+                    title = f'{base_title} {counter}'
+                    counter += 1
+                calendar_record = {
+                    'id': calendar_id,
+                    'workspace': workspace,
+                    'title': title,
+                    'color': str(body.get('color') or '').strip() or random_timeline_color(),
+                    'position': len([item for item in ensure_user_calendars(user) if item.get('workspace') == workspace]),
+                    'is_default': False,
+                    'archived': False,
+                    'created_at': now_iso(),
+                    'updated_at': now_iso(),
+                }
+                user.setdefault('calendars', []).append(calendar_record)
+                user['updated_at'] = now_iso()
+                save_store(store)
+                self.send_json(201, {'calendar': calendar_record, 'calendars': [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace and not item.get('archived')]})
+                return
+
 
             if parts[3] == 'exports' and len(parts) == 4:
                 mode = str(body.get('mode') or 'dynamic').strip().lower()
                 if mode not in {'dynamic', 'static'}:
                     self.send_json(400, {'error': 'invalid_export_mode'})
                     return
-                snapshot = build_personal_export_snapshot(acct, user, store)
-                token_info = ensure_export_record(store, acct, mode=mode, snapshot=snapshot)
+                calendar_id = resolve_calendar_id(user, str(body.get('calendar_id') or ''), 'personal')
+                snapshot = build_personal_export_snapshot(acct, user, store, calendar_id=calendar_id)
+                token_info = ensure_export_record(store, acct, mode=mode, snapshot=snapshot, calendar_id=calendar_id)
                 user['updated_at'] = now_iso()
                 save_store(store)
                 self.send_json(200, {
@@ -3741,6 +4208,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not url.startswith('http://') and not url.startswith('https://'):
                     self.send_json(400, {'error': 'url must start with http:// or https://'})
                     return
+                workspace = str(body.get('workspace') or 'personal').strip().lower()
+                if workspace not in {'personal', 'creator'}:
+                    workspace = 'personal'
+                calendar_id = resolve_calendar_id(user, str(body.get('calendar_id') or ''), workspace)
                 grouped_in = str(body.get('grouped_in') or '').strip()
                 item = {
                     'id': new_id('sub'),
@@ -3750,6 +4221,7 @@ class Handler(BaseHTTPRequestHandler):
                     'trashed': False,
                     'created_at': now_iso(),
                     'color': str(body.get('color') or '').strip() or random_timeline_color(),
+                    'calendar_id': calendar_id,
                     'author_name': user.get('display_name') or acct,
                     'author_acct': acct,
                     'official': bool(body.get('official')),
@@ -3757,6 +4229,7 @@ class Handler(BaseHTTPRequestHandler):
                     'source_format': str(body.get('source_format') or '').strip().lower()[:24],
                     'hashtags': normalize_bundle_hashtags(body.get('hashtags')),
                     'description': str(body.get('description') or '').strip(),
+                    'workspace': workspace,
                 }
                 if grouped_in and find_subscription(user, grouped_in):
                     item['grouped_in'] = grouped_in
@@ -3770,6 +4243,10 @@ class Handler(BaseHTTPRequestHandler):
                 title = str(body.get('title', '')).strip() or 'Untitled timeline'
                 description = str(body.get('description', '')).strip()
                 events = body.get('events') or []
+                workspace = str(body.get('workspace') or 'personal').strip().lower()
+                if workspace not in {'personal', 'creator'}:
+                    workspace = 'personal'
+                calendar_id = resolve_calendar_id(user, str(body.get('calendar_id') or ''), workspace)
                 timeline = {
                     'id': new_id('tl'),
                     'title': title,
@@ -3778,8 +4255,14 @@ class Handler(BaseHTTPRequestHandler):
                     'created_at': now_iso(),
                     'updated_at': now_iso(),
                     'color': random_timeline_color(),
+                    'calendar_id': calendar_id,
+                    'workspace': workspace,
                 }
                 sync_timeline_subscription(acct, user, timeline)
+                sub = find_subscription(user, timeline.get('subscription_id', ''))
+                if sub:
+                    sub['calendar_id'] = calendar_id
+                    sub['workspace'] = workspace
                 user['timelines'].insert(0, timeline)
                 user['updated_at'] = now_iso()
                 save_store(store)
@@ -3862,6 +4345,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not valid_ids:
                     self.send_json(400, {'error': 'select at least one subscription'})
                     return
+                first_sub = find_subscription(user, valid_ids[0])
+                calendar_id = resolve_calendar_id(user, str(body.get('calendar_id') or (first_sub or {}).get('calendar_id') or ''), 'creator')
                 slug_base = slugify(title)
                 slug = slug_base
                 while slug in store['published']:
@@ -3873,6 +4358,7 @@ class Handler(BaseHTTPRequestHandler):
                     'slug': slug,
                     'title': title,
                     'owner_acct': acct,
+                    'calendar_id': calendar_id,
                     'subscription_ids': valid_ids,
                     'subscription_count': len(valid_ids),
                     'created_at': now_iso(),

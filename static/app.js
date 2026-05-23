@@ -37,6 +37,7 @@ const state = {
   exportYear: new Date().getFullYear(),
   exportLinkMode: 'dynamic',
   exportLinkUrl: '',
+  activeCalendarByMode: {},
   mergeToolOpen: false,
   mergeToolSourceId: '',
   colorMenuOpenId: '',
@@ -55,6 +56,8 @@ const state = {
   authMode: 'signup',
   authSignupStatus: '',
   authSignupError: '',
+  authEmail: '',
+  authDisplayName: '',
   timeline: null,
   draftEvent: null,
   selectedEventId: null,
@@ -209,14 +212,20 @@ function currentWorkspaceMode() {
   return 'personal';
 }
 
-async function loadWorkspace() {
-  const mode = currentWorkspaceMode();
+async function loadWorkspace(modeOverride = '') {
+  const mode = modeOverride || currentWorkspaceMode();
+  const activeCalendarId = state.activeCalendarByMode[mode] || '';
   const endpoint = page === 'official' || page === 'creator'
     ? `/api/creator/${encodeURIComponent(currentAcct())}`
-    : mode === 'archive'
+    : mode === 'creator'
+      ? `/api/creator/${encodeURIComponent(currentAcct())}`
+      : mode === 'archive'
       ? `/api/archive/${encodeURIComponent(currentAcct())}`
       : `/api/personal/${encodeURIComponent(currentAcct())}`;
-  state.personal = await api(endpoint);
+  const params = new URLSearchParams();
+  if (activeCalendarId) params.set('calendar_id', activeCalendarId);
+  state.personal = await api(`${endpoint}${params.toString() ? `?${params.toString()}` : ''}`);
+  if (state.personal?.active_calendar_id) state.activeCalendarByMode[mode] = state.personal.active_calendar_id;
   if (currentAcct() === 'official' && page !== 'official') {
     state.personal.subscriptions = [];
     state.personal.visible_sources = [];
@@ -356,6 +365,27 @@ async function submitEmailLogin(payload) {
   return data.user || null;
 }
 
+async function completeSupabaseSession(accessToken, provider = 'supabase') {
+  const data = await api('/api/auth/supabase/session', {
+    method: 'POST',
+    body: JSON.stringify({ access_token: accessToken, provider, next: authNextPath() }),
+  });
+  return data;
+}
+
+async function handleSupabaseRedirect() {
+  if (page !== 'auth') return false;
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const accessToken = hash.get('access_token');
+  if (!accessToken) return false;
+  state.authSignupStatus = 'Finishing sign in...';
+  renderAuthHub();
+  const data = await completeSupabaseSession(accessToken);
+  history.replaceState({}, '', `${window.location.pathname}${window.location.search}`);
+  window.location.href = data.next || (data.user?.acct ? `/u/${encodeURIComponent(data.user.acct)}` : '/');
+  return true;
+}
+
 async function fetchWrapperSourceEvents(source) {
   const res = await fetch(source.fetch_url, { credentials: 'same-origin' });
   if (!res.ok) throw new Error('Could not load source calendar.');
@@ -387,9 +417,13 @@ async function hydrateWrapperTimeline() {
 
 async function loadTimeline() {
   const id = currentTimelineId();
+  const origin = currentTimelineOrigin();
+  const requestedCalendarId = new URLSearchParams(window.location.search).get('calendar_id') || '';
+  if (requestedCalendarId) state.activeCalendarByMode[origin] = requestedCalendarId;
   state.timelineView = '';
   state.timelineDate = null;
   if (!id) {
+    await loadWorkspace(origin);
     state.timeline = {
       id: null,
       title: 'New timeline',
@@ -399,11 +433,14 @@ async function loadTimeline() {
       updated_at: null,
       ics_url: '',
       edit_url: window.location.pathname,
+      calendar_id: state.personal?.active_calendar_id || requestedCalendarId,
     };
     return;
   }
   const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/timelines/${encodeURIComponent(id)}`);
   state.timeline = data.timeline;
+  if (state.timeline?.calendar_id) state.activeCalendarByMode[origin] = state.timeline.calendar_id;
+  await loadWorkspace(origin);
   await hydrateWrapperTimeline();
 }
 
@@ -700,16 +737,20 @@ function goToMastodonHome() {
 
 function exportDownloadUrl(kind) {
   const base = `/api/personal/${encodeURIComponent(currentAcct())}/exports/current.${kind}`;
-  if (kind !== 'pdf') return base;
+  const calendarId = state.personal?.active_calendar_id || '';
+  if (kind !== 'pdf') return calendarId ? `${base}?calendar_id=${encodeURIComponent(calendarId)}` : base;
   const params = new URLSearchParams({
     view: 'month',
     year: String(state.exportYear || new Date().getFullYear()),
   });
+  if (calendarId) params.set('calendar_id', calendarId);
   return `${base}?${params.toString()}`;
 }
 
 function exportModal() {
   if (!state.exportOpen || currentWorkspaceMode() !== 'personal') return '';
+  const calendars = state.personal?.calendars || [];
+  const activeCalendarId = state.personal?.active_calendar_id || calendars[0]?.id || '';
   return `
     <div class="modal-backdrop" data-action="close-export">
       <div class="modal" onclick="event.stopPropagation()">
@@ -722,6 +763,15 @@ function exportModal() {
           <button class="modal-close" data-action="close-export" aria-label="Close export">×</button>
         </div>
         <div class="check-list export-check-list">
+          <article class="check-row export-card export-card--compact">
+            <div class="check-copy">
+              <strong>Calendar</strong>
+              <div class="muted">Choose which calendar folder to export.</div>
+              <select data-action="export-calendar">
+                ${calendars.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === activeCalendarId ? 'selected' : ''}>${escapeHtml(item.title || 'Calendar')}</option>`).join('')}
+              </select>
+            </div>
+          </article>
           <article class="check-row export-card">
             <div class="check-copy">
               <strong>iCal link <span class="eyebrow">Recommended</span></strong>
@@ -783,6 +833,13 @@ function bindExportActions() {
   document.querySelector('[data-action="download-export-pdf"]')?.addEventListener('click', () => {
     window.open(exportDownloadUrl('pdf'), '_blank', 'noopener');
   });
+  document.querySelector('[data-action="export-calendar"]')?.addEventListener('change', async (event) => {
+    state.activeCalendarByMode.personal = event.target.value || '';
+    state.exportLinkUrl = '';
+    await loadWorkspace();
+    state.exportOpen = true;
+    render();
+  });
   document.querySelector('[data-action="export-pdf-view"]')?.addEventListener('change', (event) => {
     state.exportPdfView = 'month';
   });
@@ -797,7 +854,7 @@ function bindExportActions() {
     try {
       const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/exports`, {
         method: 'POST',
-        body: JSON.stringify({ mode: state.exportLinkMode || 'dynamic' }),
+        body: JSON.stringify({ mode: state.exportLinkMode || 'dynamic', calendar_id: state.personal?.active_calendar_id || '' }),
       });
       state.exportLinkUrl = data.url || '';
       showToast(`${data.mode === 'dynamic' ? 'Dynamic' : 'Static'} link ready`);
@@ -1031,7 +1088,8 @@ function personalToolbar() {
   const creatorMode = currentWorkspaceMode() === 'creator';
   const archiveMode = currentWorkspaceMode() === 'archive';
   const moreMenu = toolbarMoreMenu();
-  const newTimelineAction = `<a class="button primary toolbar-main-action toolbar-create-action" href="${withTimelineOrigin(`/u/${encodeURIComponent(user.acct)}/timelines/new`, currentTopSection())}">Create a new timeline</a>`;
+  const calendarParam = state.personal?.active_calendar_id ? `&calendar_id=${encodeURIComponent(state.personal.active_calendar_id)}` : '';
+  const newTimelineAction = `<a class="button primary toolbar-main-action toolbar-create-action" href="${withTimelineOrigin(`/u/${encodeURIComponent(user.acct)}/timelines/new`, currentTopSection())}${calendarParam}">Create a new timeline</a>`;
   const importAction = `<button class="button tinted toolbar-main-action toolbar-import-action" type="button" data-action="open-import-menu">Import</button>`;
   const exportAction = `<button class="button toolbar-export-action" type="button" data-action="open-export">Export</button>`;
   const actions = user.is_owner ? (creatorMode
@@ -1056,7 +1114,65 @@ function personalToolbar() {
       </div>
       ${sectionNav()}
       ${actions ? `<div class="toolbar toolbar--context">${actions}</div>` : ''}
-    </header>`;
+  </header>`;
+}
+
+function calendarTabs() {
+  const calendars = state.personal?.calendars || [];
+  const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
+  if (!calendars.length || mode === 'archive') return '';
+  const activeId = state.personal?.active_calendar_id || calendars[0]?.id || '';
+  return `<nav class="calendar-tabs" aria-label="Calendars">
+    ${calendars.map((item) => `
+      <button type="button" class="calendar-tab ${item.id === activeId ? 'active' : ''}" data-action="switch-calendar" data-id="${escapeHtml(item.id)}" title="${escapeHtml(item.title)}">
+        <span class="calendar-tab-color" style="background:${escapeHtml(timelineColor(item.color || '#2f7d80'))}"></span>
+        <span>${escapeHtml(item.title || 'Calendar')}</span>
+      </button>`).join('')}
+    <button type="button" class="calendar-tab calendar-tab-add" data-action="create-calendar" title="New calendar">+</button>
+  </nav>`;
+}
+
+function bindCalendarTabActions() {
+  document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => button.addEventListener('click', async () => {
+    const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
+    state.activeCalendarByMode[mode] = button.dataset.id || '';
+    state.exportLinkUrl = '';
+    if (page === 'timeline' && !state.timeline?.id) {
+      state.timeline.calendar_id = button.dataset.id || '';
+      await loadWorkspace(mode);
+      renderTimeline();
+      return;
+    }
+    if (page === 'timeline') {
+      await loadWorkspace(mode);
+      renderTimeline();
+      return;
+    }
+    await loadWorkspace();
+    render();
+  }));
+  document.querySelector('[data-action="create-calendar"]')?.addEventListener('click', async () => {
+    const title = window.prompt('Calendar name', 'New calendar');
+    if (!title) return;
+    try {
+      const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
+      const workspace = mode === 'creator' ? 'creator' : 'personal';
+      const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars`, {
+        method: 'POST',
+        body: JSON.stringify({ title, workspace }),
+      });
+      state.activeCalendarByMode[mode] = data.calendar?.id || '';
+      await loadWorkspace(mode);
+      if (page === 'timeline') {
+        if (!state.timeline?.id) state.timeline.calendar_id = data.calendar?.id || '';
+        renderTimeline();
+      } else {
+        render();
+      }
+    } catch (error) {
+      setBanner('', error.message);
+    }
+  });
 }
 
 function subscriptionCard(item) {
@@ -1440,6 +1556,7 @@ function renderPersonal() {
           </section>`}
         </aside>
         <main class="main-panel workspace-main">
+          ${calendarTabs()}
           <div class="calendar-stage">
             ${mastodonProvisioningBanner()}
             ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
@@ -1458,7 +1575,7 @@ function renderPersonal() {
             <section class="workspace-section">
               <div class="section-header">
                 <h3>${timelineLabel}</h3>
-                ${archiveMode ? '' : `<a class="button" href="/u/${encodeURIComponent(user.acct)}/timelines/new">New timeline</a>`}
+                ${archiveMode ? '' : `<a class="button" href="${withTimelineOrigin(`/u/${encodeURIComponent(user.acct)}/timelines/new`, currentTopSection())}${state.personal?.active_calendar_id ? `&calendar_id=${encodeURIComponent(state.personal.active_calendar_id)}` : ''}">New timeline</a>`}
               </div>
               <div class="public-list">
                 ${state.personal.timelines.length ? state.personal.timelines.map(timelineMiniCard).join('') : `<div class="empty">${archiveMode ? 'No archived timelines yet.' : 'No self-owned timelines yet.'}</div>`}
@@ -1504,6 +1621,7 @@ function renderPersonal() {
 
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   document.querySelector('[data-action="go-mastodon-home"]')?.addEventListener('click', goToMastodonHome);
+  bindCalendarTabActions();
   bindNoticeActions(renderPersonal);
   bindEventDetailActions();
   bindExportActions();
@@ -1580,7 +1698,7 @@ function renderPersonal() {
     try {
       await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions`, {
         method: 'POST',
-        body: JSON.stringify({ title: form.get('title') || '', url: form.get('url') || '' }),
+        body: JSON.stringify({ title: form.get('title') || '', url: form.get('url') || '', calendar_id: state.personal?.active_calendar_id || '', workspace: currentWorkspaceMode() === 'creator' ? 'creator' : 'personal' }),
       });
       await loadWorkspace();
       state.importOpen = false;
@@ -1893,7 +2011,7 @@ function renderPersonal() {
       const hashtags = document.getElementById('publish-hashtags')?.value || '';
       const bundle = await api(`/api/personal/${encodeURIComponent(currentAcct())}/published`, {
         method: 'POST',
-        body: JSON.stringify({ title, subscription_ids: selected, visibility, invited, hashtags }),
+        body: JSON.stringify({ title, subscription_ids: selected, visibility, invited, hashtags, calendar_id: state.personal?.active_calendar_id || '' }),
       });
       await loadWorkspace();
       state.publishOpen = false;
@@ -2390,8 +2508,11 @@ function renderTimeline() {
       <div class="editor-layout">
         <aside id="timeline-sidebar-shell" class="sidebar editor-sidebar">${timelineSidebarMarkup()}</aside>
         <main class="main-panel editor-main">
-          <div class="section-header"><div><div class="eyebrow">Timeline calendar</div><h2>${escapeHtml(state.timeline.title || 'New timeline')}</h2><p class="section-copy">Double-click to create. Click an event to edit.</p></div><div class="toolbar"><button data-action="new-event">New event</button></div></div>
-          ${state.timelineHint ? `<div id="timeline-calendar-hint" class="calendar-tip">${escapeHtml(state.timelineHint)}</div>` : '<div id="timeline-calendar-hint" class="calendar-tip hidden"></div>'}<div id="timeline-calendar"></div>
+          ${calendarTabs()}
+          <div class="editor-stage">
+            <div class="section-header"><div><div class="eyebrow">Timeline calendar</div><h2>${escapeHtml(state.timeline.title || 'New timeline')}</h2><p class="section-copy">Double-click to create. Click an event to edit.</p></div><div class="toolbar"><button data-action="new-event">New event</button></div></div>
+            ${state.timelineHint ? `<div id="timeline-calendar-hint" class="calendar-tip">${escapeHtml(state.timelineHint)}</div>` : '<div id="timeline-calendar-hint" class="calendar-tip hidden"></div>'}<div id="timeline-calendar"></div>
+          </div>
         </main>
       </div>
       <div id="timeline-overlay-shell">${timelineOverlayMarkup()}</div>
@@ -2411,6 +2532,7 @@ function renderTimeline() {
     selectedSeriesEvent,
     selectedEventReadOnly,
   });
+  bindCalendarTabActions();
   bindNoticeActions(renderTimeline);
   bindEventDetailActions();
   initCalendar();
@@ -2497,7 +2619,8 @@ async function saveTimeline(options = {}) {
   const title = document.getElementById('timeline-title').value.trim() || 'Untitled timeline';
   const description = document.getElementById('timeline-description').value.trim();
   const color = document.getElementById('timeline-color')?.value || state.timeline.color || state.timeline.overlay_color || '';
-  const payload = { title, description, color, events: state.timeline.events || [] };
+  const requestedCalendarId = new URLSearchParams(window.location.search).get('calendar_id') || '';
+  const payload = { title, description, color, events: state.timeline.events || [], calendar_id: state.personal?.active_calendar_id || state.timeline.calendar_id || requestedCalendarId, workspace: currentTimelineOrigin() };
   try {
     if (state.timeline.id) {
       const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/timelines/${encodeURIComponent(state.timeline.id)}`, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -2835,7 +2958,7 @@ async function importTimelineFromFile(file, mode) {
   if (mode === 'personal' || mode === 'creator') {
     const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/timelines`, {
       method: 'POST',
-      body: JSON.stringify({ title: parsed.title, description: `Imported from ${file.name}`, events: parsed.events }),
+      body: JSON.stringify({ title: parsed.title, description: `Imported from ${file.name}`, events: parsed.events, calendar_id: state.personal?.active_calendar_id || '', workspace: mode }),
     });
     if (mode === 'creator') {
       window.location.href = data.timeline?.edit_url || `/u/${encodeURIComponent(currentAcct())}/creator`;
@@ -3055,25 +3178,43 @@ function renderAuthHub() {
     { id: 'mastodon', label: 'Mastodon', description: 'Sign in with your linked social.time-grid.org account.', status: 'active', login_href: mastodonLoginHref(nextPath) },
   ];
   const mastodonProvider = providers.find((item) => item.id === 'mastodon');
-  const externalProviders = providers.filter((item) => item.id !== 'mastodon' && item.login_href);
+  const emailProvider = providers.find((item) => item.id === 'email' && item.native_email_auth);
+  const externalProviders = providers.filter((item) => item.id !== 'mastodon' && item.id !== 'email' && item.login_href);
+  const setupProviders = providers.filter((item) => item.id !== 'mastodon' && item.id !== 'email' && item.status && item.status !== 'active');
   const providerSummary = externalProviders.length
-    ? 'Mastodon is live now. Google, Apple, and UofT will appear here automatically once their server credentials are connected.'
-    : 'Mastodon is live now. Google, Apple, and UofT will appear here automatically once their server credentials are connected.';
+    ? 'Use Google or Apple for the fastest start, email for a portable account, or Mastodon for the social TimeGrid identity.'
+    : (setupProviders.length
+      ? `${setupProviders.map((item) => item.label).join(' and ')} setup is pending in Supabase.`
+      : 'Mastodon is live now. Add Supabase keys to enable Google, Apple, and email auth here.');
+  const isSignup = state.authMode !== 'login';
   root.innerHTML = `
     <div class="auth-shell">
       <section class="auth-centered-card">
         <div class="auth-mark">TimeGrid</div>
-        <h1>Sign in to TimeGrid</h1>
-        <p class="auth-subcopy">Use a supported identity provider to manage timelines, publishing, invites, and notifications.</p>
+        <h1>${isSignup ? 'Create your TimeGrid account' : 'Sign in to TimeGrid'}</h1>
+        <p class="auth-subcopy">Use one account for calendars, creator pages, publishing, invites, and dynamic exports.</p>
         ${recent.length ? `<div class="banner">Recent accounts on this device: ${recent.map((item) => `@${escapeHtml(item.acct)}`).join(', ')}</div>` : ''}
         ${state.authSignupError ? `<div class="banner error">${escapeHtml(state.authSignupError)}</div>` : ''}
         ${state.authSignupStatus ? `<div class="banner">${escapeHtml(state.authSignupStatus)}</div>` : ''}
-        <div class="auth-secondary-list">
-          ${mastodonProvider ? `<a class="button primary auth-provider-button" href="${escapeHtml(mastodonProvider.login_href || mastodonLoginHref(nextPath))}">Sign in with Mastodon</a>` : ''}
-          ${mastodonProvider ? `<a class="button auth-provider-button" href="${escapeHtml(mastodonSignupHref())}" target="_blank" rel="noreferrer noopener">Create Mastodon account</a>` : ''}
-          ${externalProviders.map((provider) => `<a class="button auth-provider-button" href="${escapeHtml(provider.login_href || '#')}">Continue with ${escapeHtml(provider.label)}</a>`).join('')}
+        <div class="auth-mode-switch" role="tablist" aria-label="Auth mode">
+          <button type="button" class="${isSignup ? 'active' : ''}" data-action="auth-mode" data-mode="signup">Sign up</button>
+          <button type="button" class="${!isSignup ? 'active' : ''}" data-action="auth-mode" data-mode="login">Sign in</button>
         </div>
-        <div class="auth-help">If Mastodon is already signed in and you want a different new account, open signup in a private window or sign out on <code>social.time-grid.org</code> first.</div>
+        <div class="auth-secondary-list">
+          ${externalProviders.map((provider) => `<a class="button auth-provider-button ${provider.id === 'google' ? 'primary' : ''}" href="${escapeHtml(provider.login_href || '#')}">Continue with ${escapeHtml(provider.label)}</a>`).join('')}
+          ${mastodonProvider ? `<a class="button auth-provider-button" href="${escapeHtml(mastodonProvider.login_href || mastodonLoginHref(nextPath))}">Continue with Mastodon</a>` : ''}
+        </div>
+        ${setupProviders.length ? `<div class="auth-help">${setupProviders.map((provider) => `${escapeHtml(provider.label)}: ${escapeHtml(provider.description || 'Provider setup is pending.')}`).join('<br />')}</div>` : ''}
+        ${emailProvider ? `
+          <form class="auth-email-form" id="auth-email-form">
+            ${isSignup ? `<label>Display name<input name="display_name" autocomplete="name" placeholder="Ada Lovelace" value="${escapeHtml(state.authDisplayName)}" /></label>` : ''}
+            <label>Email<input name="email" type="email" autocomplete="email" placeholder="sample1@time-grid.org" value="${escapeHtml(state.authEmail)}" required /></label>
+            <label>Password<input name="password" type="password" autocomplete="${isSignup ? 'new-password' : 'current-password'}" placeholder="At least 8 characters" required /></label>
+            <button class="button primary auth-provider-button" type="submit">${isSignup ? 'Create account with email' : 'Sign in with email'}</button>
+          </form>
+          <div class="auth-help">Test with <code>sample1@time-grid.org</code>, <code>creator.sample@time-grid.org</code>, or your own email. Use at least 8 characters for passwords.</div>
+        ` : ''}
+        ${mastodonProvider ? `<div class="auth-help">Need a social identity? <a href="${escapeHtml(mastodonSignupHref())}" target="_blank" rel="noreferrer noopener">Create a Mastodon account</a>. If Mastodon is already signed in with the wrong account, use a private window or sign out on <code>social.time-grid.org</code>.</div>` : ''}
         <div class="muted" style="text-align:center">${escapeHtml(providerSummary)}</div>
         <div class="auth-link-row">
           <a href="/published">Browse published calendars</a>
@@ -3082,6 +3223,47 @@ function renderAuthHub() {
         </div>
       </section>
     </div>`;
+  bindAuthActions();
+}
+
+function bindAuthActions() {
+  document.querySelectorAll('[data-action="auth-mode"]').forEach((button) => button.addEventListener('click', () => {
+    state.authMode = button.dataset.mode || 'signup';
+    state.authSignupError = '';
+    state.authSignupStatus = '';
+    renderAuthHub();
+  }));
+  document.getElementById('auth-email-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      email: String(form.get('email') || '').trim(),
+      password: String(form.get('password') || ''),
+      display_name: String(form.get('display_name') || '').trim(),
+      next: authNextPath(),
+    };
+    state.authEmail = payload.email;
+    state.authDisplayName = payload.display_name;
+    state.authSignupError = '';
+    state.authSignupStatus = state.authMode === 'login' ? 'Signing in...' : 'Creating account...';
+    renderAuthHub();
+    try {
+      const data = await api(state.authMode === 'login' ? '/api/auth/email/login' : '/api/auth/email/signup', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      if (data.verification_required) {
+        state.authSignupStatus = data.message || 'Check your email to confirm your account.';
+        renderAuthHub();
+        return;
+      }
+      window.location.href = data.next || (data.user?.acct ? `/u/${encodeURIComponent(data.user.acct)}` : '/');
+    } catch (error) {
+      state.authSignupStatus = '';
+      state.authSignupError = error.message || 'Auth failed';
+      renderAuthHub();
+    }
+  });
 }
 
 function renderPublishedEmbed() {
@@ -3457,6 +3639,7 @@ function render() {
 
 async function boot() {
   try {
+    if (await handleSupabaseRedirect()) return;
     await loadMe();
     await loadNotifications();
     await loadCurrentPageData();

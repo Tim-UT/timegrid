@@ -555,6 +555,44 @@ iframe {
   display: grid;
   gap: 10px;
 }
+.auth-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-subtle);
+}
+.auth-mode-switch button {
+  min-height: 36px;
+  border: 0;
+  background: transparent;
+  justify-content: center;
+}
+.auth-mode-switch button.active {
+  background: var(--panel);
+  box-shadow: 0 1px 4px rgba(18, 31, 53, 0.08);
+}
+.auth-email-form {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+.auth-email-form label {
+  display: grid;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+.auth-email-form input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  background: var(--panel);
+}
 .auth-provider-button {
   width: 100%;
   justify-content: center;
@@ -3298,6 +3336,67 @@ button.tinted:hover {
   align-items: center;
 }
 
+.calendar-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  width: 148px;
+  flex: 0 0 148px;
+  padding: 8px;
+  border-right: 1px solid var(--line);
+}
+
+.calendar-tab {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.calendar-tab:hover,
+.calendar-tab.active {
+  background: var(--panel-subtle);
+  border-color: var(--line);
+}
+
+.calendar-tab-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.calendar-tab-add {
+  grid-template-columns: 1fr;
+  place-items: center;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.workspace-main {
+  display: flex;
+  align-items: stretch;
+}
+
+.workspace-main .calendar-stage,
+.editor-main .editor-stage {
+  min-width: 0;
+  flex: 1;
+}
+
+.editor-main {
+  display: flex;
+  align-items: stretch;
+}
+
 .landing-faq {
   max-width: 900px;
 }
@@ -3336,6 +3435,23 @@ button.tinted:hover {
 
   .landing-preview {
     order: -1;
+  }
+
+  .workspace-main,
+  .editor-main {
+    display: block;
+  }
+
+  .calendar-tabs {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .calendar-tab {
+    min-width: 132px;
   }
 }
 
