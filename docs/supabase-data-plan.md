@@ -91,3 +91,20 @@ The app profile should not assume one auth provider per account. Instead,
 
 This staged approach lets existing import, edit, publish, export, dynamic export,
 and embed routes keep working while storage moves underneath them.
+
+## Verification
+
+Run these checks before changing the Supabase schema or storage mapping:
+
+```bash
+python3 scripts/test_supabase_schema_contract.py
+python3 scripts/test_storage_reconcile.py
+python3 scripts/smoke_large_dataset.py
+python3 scripts/smoke_timegrid_flows.py
+```
+
+The schema contract check proves the migration keeps the required TimeGrid
+tables, calendar/export foreign keys, indexes, constraints, and RLS enablement.
+The smoke flows cover multi-calendar personal and creator workspaces, imports,
+dynamic/static exports, edit-after-dynamic-export, published bundle lifecycle,
+timeline moves, and detach behavior.
