@@ -165,6 +165,34 @@ def main() -> int:
             creator_workspace = client.json('GET', f'/api/creator/sample1?calendar_id={urllib.parse.quote(creator_calendar["id"])}')
             assert creator_workspace['active_calendar_id'] == creator_calendar['id']
             assert any(item['id'] == creator_imported['timeline']['id'] for item in creator_workspace['timelines']), 'creator calendar should contain its new timeline'
+            creator_subscription_id = creator_imported['subscription']['id']
+
+            published = client.json('POST', '/api/personal/sample1/published', {
+                'title': 'Creator release bundle',
+                'subscription_ids': [creator_subscription_id],
+                'visibility': 'invited',
+                'invited': ['sample2@example.com'],
+                'hashtags': '#release #smoke',
+                'calendar_id': creator_calendar['id'],
+            })
+            assert published['slug'], 'published bundle should return a slug'
+            assert published['calendar_id'] == creator_calendar['id']
+            assert published['visibility'] == 'invited'
+            assert 'release' in published['hashtags']
+
+            managed = client.json('PATCH', f'/api/personal/sample1/published/{urllib.parse.quote(published["slug"])}', {
+                'visibility': 'private',
+                'invited': [],
+                'hashtags': '#private #qa',
+            })
+            assert managed['visibility'] == 'private'
+            assert managed['invited'] == []
+            assert 'qa' in managed['hashtags']
+
+            archived_bundle = client.json('DELETE', f'/api/personal/sample1/published/{urllib.parse.quote(published["slug"])}?mode=archive')
+            assert archived_bundle['mode'] == 'archive'
+            archive_workspace = client.json('GET', '/api/archive/sample1')
+            assert any(item['slug'] == published['slug'] for item in archive_workspace.get('archived_published', [])), 'archived published bundle should appear in archive workspace'
 
             dynamic = client.json('POST', '/api/personal/sample1/exports', {
                 'mode': 'dynamic',
@@ -229,6 +257,7 @@ def main() -> int:
                 'ok': True,
                 'calendar_id': calendar_id,
                 'creator_calendar_id': creator_calendar['id'],
+                'published_slug': published['slug'],
                 'moved_calendar_id': overflow_calendar['id'],
                 'timeline_id': timeline['id'],
                 'dynamic_export': dynamic['url'],
