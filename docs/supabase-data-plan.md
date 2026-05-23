@@ -72,10 +72,10 @@ exports.
 
 ## Auth Direction
 
-Supabase Auth handles email sign-in/sign-up in the current phase. Mastodon OAuth
-remains supported because it is part of the current TimeGrid social identity
-model. Google and Apple can be added later by enabling those providers in
-Supabase Auth and re-enabling their UI buttons.
+Mastodon OAuth is the only visible sign-in/sign-up option in the current phase
+because TimeGrid can rely on the existing Mastodon email flow. Supabase
+email/password, Google, and Apple can be added later by configuring those
+providers and re-enabling their UI buttons.
 
 The app profile should not assume one auth provider per account. Instead,
 `timegrid_auth_identities` links many providers to one TimeGrid `acct`.

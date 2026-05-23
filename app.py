@@ -362,19 +362,6 @@ def configured_auth_providers() -> list[dict[str, Any]]:
             'provisions_mastodon': True,
         },
     ]
-    if supabase_auth_enabled():
-        settings = supabase_auth_settings()
-        external = settings.get('external') if isinstance(settings, dict) else {}
-        email_enabled = not external or bool(external.get('email'))
-        if email_enabled:
-            providers.append({
-                'id': 'email',
-                'label': 'Email',
-                'description': 'Sign up or sign in with email and password.',
-                'status': 'active',
-                'provisions_mastodon': False,
-                'native_email_auth': True,
-            })
     for provider_id in ('google', 'apple', 'uoft'):
         if supabase_auth_enabled() and provider_id in {'google', 'apple'}:
             continue
@@ -2836,13 +2823,7 @@ def auth_initial_html(next_path: str) -> str:
         <div class="auth-secondary-list">
           <a class="button auth-provider-button" href="{mastodon_href}">Continue with Mastodon</a>
         </div>
-        <form class="auth-email-form" onsubmit="return false">
-          <label>Display name<input name="display_name" autocomplete="name" placeholder="Ada Lovelace" /></label>
-          <label>Email<input name="email" type="email" autocomplete="email" placeholder="sample1@time-grid.org" required /></label>
-          <label>Password<input name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required /></label>
-          <button class="button primary auth-provider-button" type="submit">Create account with email</button>
-        </form>
-        <div class="auth-help">Test with <code>sample1@time-grid.org</code>, <code>creator.sample@time-grid.org</code>, or your own email.</div>
+        <div class="auth-help">Use your social.time-grid.org Mastodon account for TimeGrid access.</div>
         <div class="auth-link-row">
           <a href="/published">Browse published calendars</a>
           <span>·</span>

@@ -34,27 +34,11 @@ Localhost entries are only for development.
 
 This phase uses:
 
-- Email/password
 - Mastodon OAuth
 
-Google and Apple buttons are intentionally hidden for now. They can be restored
-later after provider credentials are configured in Supabase Auth.
-
-## Test Emails
-
-Use these for development flow checks:
-
-```text
-sample1@time-grid.org
-creator.sample@time-grid.org
-```
-
-Use at least 8 characters for passwords. If email confirmations are enabled,
-signup returns a "check your email" state and login works after confirmation.
-
-Supabase's built-in email sender is rate-limited. If signup returns
-`email rate limit exceeded`, configure a custom SMTP provider in Supabase Auth
-before broader testing or launch.
+Email/password, Google, and Apple buttons are intentionally hidden for now.
+Mastodon email/SMPP delivery is the active account creation path. Email/password
+can be restored later after a custom SMTP provider is configured.
 
 ## Local Browser QA
 

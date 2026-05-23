@@ -3402,9 +3402,8 @@ function renderAuthHub() {
     { id: 'mastodon', label: 'Mastodon', description: 'Sign in with your linked social.time-grid.org account.', status: 'active', login_href: mastodonLoginHref(nextPath) },
   ];
   const mastodonProvider = providers.find((item) => item.id === 'mastodon');
-  const emailProvider = providers.find((item) => item.id === 'email' && item.native_email_auth);
   const externalProviders = providers.filter((item) => !['mastodon', 'email', 'google', 'apple'].includes(item.id) && item.login_href);
-  const providerSummary = 'Use email for TimeGrid calendar access, or Mastodon for the social TimeGrid identity.';
+  const providerSummary = 'Use your social.time-grid.org Mastodon account for TimeGrid access.';
   const isSignup = state.authMode !== 'login';
   root.innerHTML = `
     <div class="auth-shell">
@@ -3423,15 +3422,6 @@ function renderAuthHub() {
           ${externalProviders.map((provider) => `<a class="button auth-provider-button ${provider.id === 'google' ? 'primary' : ''}" href="${escapeHtml(provider.login_href || '#')}">Continue with ${escapeHtml(provider.label)}</a>`).join('')}
           ${mastodonProvider ? `<a class="button auth-provider-button" href="${escapeHtml(mastodonProvider.login_href || mastodonLoginHref(nextPath))}">Continue with Mastodon</a>` : ''}
         </div>
-        ${emailProvider ? `
-          <form class="auth-email-form" id="auth-email-form">
-            ${isSignup ? `<label>Display name<input name="display_name" autocomplete="name" placeholder="Ada Lovelace" value="${escapeHtml(state.authDisplayName)}" /></label>` : ''}
-            <label>Email<input name="email" type="email" autocomplete="email" placeholder="sample1@time-grid.org" value="${escapeHtml(state.authEmail)}" required /></label>
-            <label>Password<input name="password" type="password" autocomplete="${isSignup ? 'new-password' : 'current-password'}" placeholder="At least 8 characters" required /></label>
-            <button class="button primary auth-provider-button" type="submit">${isSignup ? 'Create account with email' : 'Sign in with email'}</button>
-          </form>
-          <div class="auth-help">Test with <code>sample1@time-grid.org</code>, <code>creator.sample@time-grid.org</code>, or your own email. Use at least 8 characters for passwords.</div>
-        ` : ''}
         ${mastodonProvider ? `<div class="auth-help">Need a social identity? <a href="${escapeHtml(mastodonSignupHref())}" target="_blank" rel="noreferrer noopener">Create a Mastodon account</a>. If Mastodon is already signed in with the wrong account, use a private window or sign out on <code>social.time-grid.org</code>.</div>` : ''}
         <div class="muted" style="text-align:center">${escapeHtml(providerSummary)}</div>
         <div class="auth-link-row">
@@ -3451,37 +3441,6 @@ function bindAuthActions() {
     state.authSignupStatus = '';
     renderAuthHub();
   }));
-  document.getElementById('auth-email-form')?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const payload = {
-      email: String(form.get('email') || '').trim(),
-      password: String(form.get('password') || ''),
-      display_name: String(form.get('display_name') || '').trim(),
-      next: authNextPath(),
-    };
-    state.authEmail = payload.email;
-    state.authDisplayName = payload.display_name;
-    state.authSignupError = '';
-    state.authSignupStatus = state.authMode === 'login' ? 'Signing in...' : 'Creating account...';
-    renderAuthHub();
-    try {
-      const data = await api(state.authMode === 'login' ? '/api/auth/email/login' : '/api/auth/email/signup', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-      if (data.verification_required) {
-        state.authSignupStatus = data.message || 'Check your email to confirm your account.';
-        renderAuthHub();
-        return;
-      }
-      window.location.href = data.next || (data.user?.acct ? `/u/${encodeURIComponent(data.user.acct)}` : '/');
-    } catch (error) {
-      state.authSignupStatus = '';
-      state.authSignupError = error.message || 'Auth failed';
-      renderAuthHub();
-    }
-  });
 }
 
 function renderPublishedEmbed() {
