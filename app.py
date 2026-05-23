@@ -134,6 +134,18 @@ def save_store(data: dict[str, Any]) -> None:
         CALENDAR_TEXT_CACHE.clear()
 
 
+def save_user_fragment(data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False) -> None:
+    global STORE_CACHE
+    if STORAGE is not None:
+        STORAGE.save_user_fragment(data, acct, calendars=calendars, subscriptions=subscriptions, timelines=timelines)
+        with STORE_CACHE_LOCK:
+            STORE_CACHE = copy.deepcopy(data)
+        with CALENDAR_TEXT_CACHE_LOCK:
+            CALENDAR_TEXT_CACHE.clear()
+        return
+    save_store(data)
+
+
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False, dir=DATA_DIR) as tmp:
@@ -4292,7 +4304,7 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 user.setdefault('calendars', []).append(calendar_record)
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, calendars=True)
                 self.send_json(201, {'calendar': calendar_record, 'calendars': [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace and not item.get('archived')]})
                 return
 
@@ -4610,7 +4622,7 @@ class Handler(BaseHTTPRequestHandler):
                             item['position'] = position_by_id[item.get('id')]
                 calendar['updated_at'] = now_iso()
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, calendars=True)
                 self.send_json(200, {'calendar': calendar, 'calendars': [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace and not item.get('archived')]})
                 return
 
@@ -4723,7 +4735,7 @@ class Handler(BaseHTTPRequestHandler):
                 if 'position' in body:
                     move_item_to_position(user.get('subscriptions', []), item, body.get('position'))
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True, timelines=True)
                 self.send_json(200, serialize_subscription(acct, item, user))
                 return
 

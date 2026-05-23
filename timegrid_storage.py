@@ -317,6 +317,36 @@ class SupabaseStorage:
         rows = transform(data)
         import_rows(self.writer, rows)
 
+    def save_user_fragment(self, data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False) -> None:
+        acct = str(acct or '').strip().lower()
+        if not acct:
+            self.save_store(data)
+            return
+        rows = transform(data)
+        user_rows = [row for row in rows['users'] if row.get('acct') == acct]
+        self.writer.upsert('timegrid_users', user_rows, on_conflict='acct')
+        if calendars:
+            self.writer.upsert(
+                'timegrid_calendars',
+                [row for row in rows['calendars'] if row.get('owner_acct') == acct],
+                on_conflict='id',
+            )
+        if timelines:
+            timeline_rows = [row for row in rows['timelines_initial'] if row.get('owner_acct') == acct]
+            timeline_ids = {row.get('id') for row in timeline_rows}
+            self.writer.upsert('timegrid_timelines', timeline_rows, on_conflict='id')
+            for row in rows['timeline_subscription_links']:
+                if row.get('id') in timeline_ids:
+                    self.writer.patch('timegrid_timelines', 'id', row['id'], {'subscription_id': row['subscription_id']})
+        if subscriptions:
+            subscription_rows = [row for row in rows['subscriptions_initial'] if row.get('owner_acct') == acct]
+            subscription_ids = {row.get('id') for row in subscription_rows}
+            self.writer.upsert('timegrid_subscriptions', subscription_rows, on_conflict='id')
+            for row in rows['subscription_fk_links']:
+                sub_id = row.get('id')
+                if sub_id in subscription_ids:
+                    self.writer.patch('timegrid_subscriptions', 'id', sub_id, {k: v for k, v in row.items() if k != 'id' and v})
+
     def reconcile_store(self, data: dict[str, Any]) -> None:
         rows = transform(data)
         import_rows(self.writer, rows)
