@@ -61,6 +61,7 @@ const state = {
   draggedSubscriptionId: '',
   draggedCalendarId: '',
   workspaceLoadSeq: 0,
+  workspaceBusyLabel: '',
   timeline: null,
   draftEvent: null,
   selectedEventId: null,
@@ -1140,23 +1141,40 @@ function calendarTabs() {
   </nav>`;
 }
 
+function workspaceProgress() {
+  if (!state.workspaceBusyLabel) return '';
+  return `<div class="workspace-progress" role="status" aria-live="polite">
+    <div class="workspace-progress__bar"></div>
+    <span>${escapeHtml(state.workspaceBusyLabel)}</span>
+  </div>`;
+}
+
+function setWorkspaceBusy(label = '') {
+  state.workspaceBusyLabel = label;
+}
+
 function bindCalendarTabActions() {
   document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => button.addEventListener('click', async () => {
     const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
     state.activeCalendarByMode[mode] = button.dataset.id || '';
     state.exportLinkUrl = '';
+    setWorkspaceBusy('Switching calendar...');
+    if (page !== 'timeline') render();
     if (page === 'timeline' && !state.timeline?.id) {
       state.timeline.calendar_id = button.dataset.id || '';
       await loadWorkspace(mode);
+      setWorkspaceBusy('');
       renderTimeline();
       return;
     }
     if (page === 'timeline') {
       await loadWorkspace(mode);
+      setWorkspaceBusy('');
       renderTimeline();
       return;
     }
     await loadWorkspace();
+    setWorkspaceBusy('');
     render();
   }));
   document.querySelector('[data-action="create-calendar"]')?.addEventListener('click', async () => {
@@ -1165,6 +1183,8 @@ function bindCalendarTabActions() {
     try {
       const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
       const workspace = mode === 'creator' ? 'creator' : 'personal';
+      setWorkspaceBusy('Creating calendar...');
+      if (page !== 'timeline') render();
       const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars`, {
         method: 'POST',
         body: JSON.stringify({ title, workspace }),
@@ -1176,6 +1196,7 @@ function bindCalendarTabActions() {
         state.personal.active_calendar_id = calendarId;
       }
       await loadWorkspace(mode, calendarId);
+      setWorkspaceBusy('');
       if (page === 'timeline') {
         if (!state.timeline?.id) state.timeline.calendar_id = calendarId;
         renderTimeline();
@@ -1183,6 +1204,7 @@ function bindCalendarTabActions() {
         render();
       }
     } catch (error) {
+      setWorkspaceBusy('');
       setBanner('', error.message);
     }
   });
@@ -1206,30 +1228,39 @@ function bindCalendarTabActions() {
       const targetCalendarId = button.dataset.id || '';
       try {
         if (state.draggedSubscriptionId) {
+          const subscriptionId = state.draggedSubscriptionId;
           const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
           const workspace = mode === 'creator' ? 'creator' : 'personal';
-          await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(state.draggedSubscriptionId)}`, {
+          setWorkspaceBusy('Moving timeline...');
+          render();
+          await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
             method: 'PATCH',
             body: JSON.stringify({ calendar_id: targetCalendarId, workspace }),
           });
           state.activeCalendarByMode[mode] = targetCalendarId;
           state.draggedSubscriptionId = '';
           await loadWorkspace(mode);
+          setWorkspaceBusy('');
           render();
           return;
         }
         if (state.draggedCalendarId && state.draggedCalendarId !== targetCalendarId) {
-          await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(state.draggedCalendarId)}`, {
+          const calendarId = state.draggedCalendarId;
+          setWorkspaceBusy('Reordering calendars...');
+          render();
+          await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(calendarId)}`, {
             method: 'PATCH',
             body: JSON.stringify({ position: Number(button.dataset.index || 0) }),
           });
           state.draggedCalendarId = '';
           await loadWorkspace();
+          setWorkspaceBusy('');
           render();
         }
       } catch (error) {
         state.draggedSubscriptionId = '';
         state.draggedCalendarId = '';
+        setWorkspaceBusy('');
         setBanner('', error.message || 'Could not move item');
       }
     });
@@ -1260,18 +1291,23 @@ function bindSubscriptionDragActions() {
       card.classList.remove('drag-over');
       const targetId = card.dataset.id || '';
       if (!state.draggedSubscriptionId || state.draggedSubscriptionId === targetId) return;
+      const subscriptionId = state.draggedSubscriptionId;
       const cards = [...document.querySelectorAll('[data-draggable-subscription="true"]')];
       const targetIndex = Math.max(0, cards.findIndex((node) => node.dataset.id === targetId));
       try {
-        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(state.draggedSubscriptionId)}`, {
+        setWorkspaceBusy('Reordering timeline...');
+        render();
+        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
           method: 'PATCH',
           body: JSON.stringify({ position: targetIndex }),
         });
         state.draggedSubscriptionId = '';
         await loadWorkspace();
+        setWorkspaceBusy('');
         render();
       } catch (error) {
         state.draggedSubscriptionId = '';
+        setWorkspaceBusy('');
         setBanner('', error.message || 'Could not reorder timeline');
       }
     });
@@ -1295,16 +1331,21 @@ function bindSubscriptionDragActions() {
     event.preventDefault();
     event.currentTarget.classList.remove('drag-over');
     if (!state.draggedSubscriptionId) return;
+    const subscriptionId = state.draggedSubscriptionId;
     try {
-      await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(state.draggedSubscriptionId)}`, {
+      setWorkspaceBusy('Reordering timeline...');
+      render();
+      await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
         method: 'PATCH',
         body: JSON.stringify({ position: state.personal.subscriptions.length - 1 }),
       });
       state.draggedSubscriptionId = '';
       await loadWorkspace();
+      setWorkspaceBusy('');
       render();
     } catch (error) {
       state.draggedSubscriptionId = '';
+      setWorkspaceBusy('');
       setBanner('', error.message || 'Could not reorder timeline');
     }
   });
@@ -1671,6 +1712,7 @@ function renderPersonal() {
       ${personalToolbar()}
       <div class="grid workspace-grid">
         <aside class="sidebar workspace-sidebar">
+          ${workspaceProgress()}
           <div class="workspace-left-stack">
             ${calendarTabs()}
             <section class="sidebar-section subscriptions-panel">
