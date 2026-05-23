@@ -60,6 +60,7 @@ const state = {
   authDisplayName: '',
   draggedSubscriptionId: '',
   draggedCalendarId: '',
+  workspaceLoadSeq: 0,
   timeline: null,
   draftEvent: null,
   selectedEventId: null,
@@ -214,9 +215,10 @@ function currentWorkspaceMode() {
   return 'personal';
 }
 
-async function loadWorkspace(modeOverride = '') {
+async function loadWorkspace(modeOverride = '', calendarIdOverride = '') {
   const mode = modeOverride || currentWorkspaceMode();
-  const activeCalendarId = state.activeCalendarByMode[mode] || '';
+  const loadSeq = ++state.workspaceLoadSeq;
+  const activeCalendarId = calendarIdOverride || state.activeCalendarByMode[mode] || '';
   const endpoint = page === 'official' || page === 'creator'
     ? `/api/creator/${encodeURIComponent(currentAcct())}`
     : mode === 'creator'
@@ -226,7 +228,9 @@ async function loadWorkspace(modeOverride = '') {
       : `/api/personal/${encodeURIComponent(currentAcct())}`;
   const params = new URLSearchParams();
   if (activeCalendarId) params.set('calendar_id', activeCalendarId);
-  state.personal = await api(`${endpoint}${params.toString() ? `?${params.toString()}` : ''}`);
+  const data = await api(`${endpoint}${params.toString() ? `?${params.toString()}` : ''}`);
+  if (loadSeq !== state.workspaceLoadSeq) return false;
+  state.personal = data;
   if (state.personal?.active_calendar_id) state.activeCalendarByMode[mode] = state.personal.active_calendar_id;
   if (currentAcct() === 'official' && page !== 'official') {
     state.personal.subscriptions = [];
@@ -243,6 +247,7 @@ async function loadWorkspace(modeOverride = '') {
     state.personal.published = (state.personal.published || []).filter((item) => !item.official);
     state.personal.publish_candidates = (state.personal.publish_candidates || state.personal.subscriptions || []).filter((item) => !item.official && !item.trashed && !item.grouped_in);
   }
+  return true;
 }
 
 function updateSubscriptionColorState(subscriptionId, color) {
@@ -1163,10 +1168,15 @@ function bindCalendarTabActions() {
         method: 'POST',
         body: JSON.stringify({ title, workspace }),
       });
-      state.activeCalendarByMode[mode] = data.calendar?.id || '';
-      await loadWorkspace(mode);
+      const calendarId = data.calendar?.id || '';
+      state.activeCalendarByMode[mode] = calendarId;
+      if (state.personal && Array.isArray(data.calendars)) {
+        state.personal.calendars = data.calendars;
+        state.personal.active_calendar_id = calendarId;
+      }
+      await loadWorkspace(mode, calendarId);
       if (page === 'timeline') {
-        if (!state.timeline?.id) state.timeline.calendar_id = data.calendar?.id || '';
+        if (!state.timeline?.id) state.timeline.calendar_id = calendarId;
         renderTimeline();
       } else {
         render();
@@ -3762,6 +3772,7 @@ function render() {
 async function boot() {
   try {
     if (await handleSupabaseRedirect()) return;
+    if (page === 'auth') renderAuthHub();
     await loadMe();
     await loadNotifications();
     await loadCurrentPageData();
