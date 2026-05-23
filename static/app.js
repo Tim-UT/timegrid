@@ -1,5 +1,24 @@
 const root = document.getElementById('app');
-const page = document.body.dataset.page;
+function pageFromPath(pathname = window.location.pathname) {
+  const fallback = document.body.dataset.page || 'landing';
+  const parts = pathname.split('/').filter(Boolean);
+  if (!parts.length) return fallback;
+  if (parts[0] === 'auth') return 'auth';
+  if (parts[0] === 'community' || parts[0] === 'people') return parts[1] ? 'community-profile' : 'community';
+  if (parts[0] === 'published') return parts[1] ? 'published-detail' : 'published';
+  if (parts[0] === 'u') {
+    if (parts[2] === 'creator') return 'creator';
+    if (parts[2] === 'official') return 'official';
+    if (parts[2] === 'archive') return 'archive';
+    if (parts[2] === 'timelines') return 'timeline';
+    return 'personal';
+  }
+  return fallback;
+}
+
+let page = pageFromPath();
+document.body.dataset.page = page;
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
 const state = {
   me: null,
@@ -10,6 +29,9 @@ const state = {
   message: '',
   error: '',
   publishOpen: false,
+  importOpen: false,
+  actionMenuOpen: false,
+  routeSwitching: false,
   exportOpen: false,
   exportPdfView: 'month',
   exportYear: new Date().getFullYear(),
@@ -17,6 +39,7 @@ const state = {
   exportLinkUrl: '',
   mergeToolOpen: false,
   mergeToolSourceId: '',
+  colorMenuOpenId: '',
   publishedCategory: 'public',
   publishedSort: 'newest',
   publishedManageSlug: '',
@@ -24,6 +47,7 @@ const state = {
   notices: [],
   noticesUnread: 0,
   noticesOpen: false,
+  noticeToast: null,
   community: [],
   communityQuery: '',
   communityProfile: null,
@@ -43,6 +67,7 @@ const state = {
   timelineHint: '',
   recurrenceConversion: null,
   eventDetail: null,
+  eventEditModal: null,
 };
 
 function escapeHtml(value) {
@@ -52,6 +77,38 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function timelineColor(value) {
+  const color = String(value || '').trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : '#146c73';
+}
+
+function calendarViewStorageKey(scope) {
+  return `timegrid_calendar_view:${scope || 'default'}`;
+}
+
+function savedCalendarView(scope) {
+  try {
+    return window.localStorage.getItem(calendarViewStorageKey(scope)) || '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+function saveCalendarView(scope, view) {
+  if (!view) return;
+  try {
+    window.localStorage.setItem(calendarViewStorageKey(scope), view);
+  } catch (_error) {}
+}
+
+function responsiveCalendarGridHeight() {
+  const width = window.innerWidth || 1280;
+  const height = window.innerHeight || 800;
+  if (width < 640) return Math.max(620, Math.min(760, height - 120));
+  if (width > 1600) return Math.max(760, Math.min(980, height - 260));
+  return Math.max(700, Math.min(900, height - 220));
 }
 
 async function api(url, options = {}) {
@@ -147,19 +204,34 @@ function eventDetailModal() {
 }
 
 function currentWorkspaceMode() {
-  if (page === 'creator') return 'creator';
+  if (page === 'creator' || page === 'official') return 'creator';
   if (page === 'archive') return 'archive';
   return 'personal';
 }
 
 async function loadWorkspace() {
   const mode = currentWorkspaceMode();
-  const endpoint = mode === 'creator'
+  const endpoint = page === 'official' || page === 'creator'
     ? `/api/creator/${encodeURIComponent(currentAcct())}`
     : mode === 'archive'
       ? `/api/archive/${encodeURIComponent(currentAcct())}`
       : `/api/personal/${encodeURIComponent(currentAcct())}`;
   state.personal = await api(endpoint);
+  if (currentAcct() === 'official' && page !== 'official') {
+    state.personal.subscriptions = [];
+    state.personal.visible_sources = [];
+    state.personal.published = [];
+    state.personal.archived_published = [];
+    state.personal.publish_candidates = [];
+    state.personal.timelines = [];
+    state.personal.trash = [];
+  } else if (page === 'creator') {
+    state.personal.subscriptions = (state.personal.subscriptions || []).filter((item) => !item.official);
+    const visibleIds = new Set((state.personal.subscriptions || []).map((item) => item.id));
+    state.personal.visible_sources = (state.personal.visible_sources || []).filter((item) => visibleIds.has(item.id));
+    state.personal.published = (state.personal.published || []).filter((item) => !item.official);
+    state.personal.publish_candidates = (state.personal.publish_candidates || state.personal.subscriptions || []).filter((item) => !item.official && !item.trashed && !item.grouped_in);
+  }
 }
 
 function updateSubscriptionColorState(subscriptionId, color) {
@@ -178,6 +250,20 @@ function updateSubscriptionColorState(subscriptionId, color) {
   });
   (state.personal.timelines || []).forEach((item) => {
     if (item.subscription_id === subscriptionId) item.color = color;
+  });
+}
+
+function updateSubscriptionColorDom(subscriptionId, color) {
+  if (!subscriptionId || !window.CSS?.escape) return;
+  document.querySelectorAll(`[data-id="${CSS.escape(subscriptionId)}"]`).forEach((node) => {
+    const card = node.closest('.sub-card, .trash-card');
+    if (card) card.style.setProperty('--timeline-color', color);
+    if (node.matches('[data-action="toggle-color-menu"]')) node.style.setProperty('--swatch-color', color);
+  });
+  document.querySelectorAll(`[data-action="subscription-color-choice"][data-id="${CSS.escape(subscriptionId)}"]`).forEach((button) => {
+    const active = (button.dataset.color || '').toLowerCase() === color.toLowerCase();
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-checked', String(active));
   });
 }
 
@@ -321,10 +407,81 @@ async function loadTimeline() {
   await hydrateWrapperTimeline();
 }
 
-function setBanner(message = '', error = '') {
-  state.message = message;
-  state.error = error;
+function noticeTitleAndBody(message) {
+  const text = String(message || '').trim();
+  if (text.length <= 90) return { title: text, body: '' };
+  return { title: 'TimeGrid update', body: text };
+}
+
+function scheduleNoticeToastDismiss() {
+  window.clearTimeout(window.__tgNoticeToastExitTimer);
+  window.clearTimeout(window.__tgNoticeToastClearTimer);
+  window.__tgNoticeToastExitTimer = window.setTimeout(() => {
+    if (!state.noticeToast) return;
+    state.noticeToast = { ...state.noticeToast, exiting: true };
+    refreshNoticeUi();
+  }, 5000);
+  window.__tgNoticeToastClearTimer = window.setTimeout(() => {
+    state.noticeToast = null;
+    refreshNoticeUi();
+  }, 5400);
+}
+
+function recordNotice(message) {
+  if (!state.me?.authenticated || !message) return;
+  const { title, body } = noticeTitleAndBody(message);
+  const href = window.location.pathname;
+  const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const localItem = {
+    id: localId,
+    kind: 'workspace_notice',
+    title,
+    body,
+    href,
+    actor_acct: state.me?.acct || '',
+    created_at: new Date().toISOString(),
+    read_at: '',
+  };
+  state.notices = [localItem, ...(state.notices || [])].slice(0, 60);
+  state.noticesUnread = Number(state.noticesUnread || 0) + 1;
+  api('/api/notifications', {
+    method: 'POST',
+    body: JSON.stringify({ title, body, href }),
+  }).then((data) => {
+    if (data?.item) {
+      state.notices = (state.notices || []).map((item) => item.id === localId ? data.item : item);
+    }
+    if (Number.isFinite(Number(data?.unread))) state.noticesUnread = Number(data.unread);
+    updateNoticeBadgeDom();
+  }).catch(() => {});
+}
+
+function updateNoticeBadgeDom() {
+  document.querySelectorAll('.notification-button__badge').forEach((badge) => {
+    badge.textContent = String(state.noticesUnread || '');
+    badge.setAttribute('aria-label', `${state.noticesUnread || 0} unread notifications`);
+    badge.classList.toggle('hidden', !state.noticesUnread);
+  });
+}
+
+function refreshNoticeUi() {
+  if (page === 'timeline' && document.getElementById('timeline-overlay-shell')) {
+    renderTimelineEditorOnly();
+    return;
+  }
   render();
+}
+
+function setBanner(message = '', error = '') {
+  state.message = '';
+  state.error = error;
+  const text = message || error;
+  if (text) {
+    state.noticeToast = { message: text, error: Boolean(error), exiting: false };
+    scheduleNoticeToastDismiss();
+  }
+  if (message) recordNotice(message);
+  refreshNoticeUi();
 }
 
 function showToast(message) {
@@ -455,13 +612,25 @@ function mastodonProvisioningBanner() {
     </div>`;
 }
 
+function noticeToastMarkup() {
+  const notice = state.noticeToast;
+  if (!notice?.message) return '';
+  const classes = ['notice-toast'];
+  if (notice.error) classes.push('error');
+  if (notice.exiting) classes.push('exiting');
+  return `<div class="${classes.join(' ')}" role="status">${escapeHtml(notice.message)}</div>`;
+}
+
 function notificationsButton() {
   if (!state.me?.authenticated) return '';
   return `
-    <button class="notification-button" data-action="open-notices" aria-label="Open Notification Center">
-      <span class="notification-button__icon" aria-hidden="true">🔔</span>
-      ${state.noticesUnread ? `<span class="notification-button__badge" aria-label="${escapeHtml(String(state.noticesUnread))} unread notifications">${escapeHtml(String(state.noticesUnread))}</span>` : ''}
-    </button>`;
+    <div class="notification-anchor">
+      <button class="notification-button" data-action="open-notices" aria-label="Open Notification Center">
+        <span class="notification-button__icon" aria-hidden="true">🔔</span>
+        ${state.noticesUnread ? `<span class="notification-button__badge" aria-label="${escapeHtml(String(state.noticesUnread))} unread notifications">${escapeHtml(String(state.noticesUnread))}</span>` : ''}
+      </button>
+      ${noticeToastMarkup()}
+    </div>`;
 }
 
 function notificationsModal() {
@@ -552,44 +721,45 @@ function exportModal() {
           </div>
           <button class="modal-close" data-action="close-export" aria-label="Close export">×</button>
         </div>
-        <div class="check-list">
-          <article class="check-row">
+        <div class="check-list export-check-list">
+          <article class="check-row export-card">
             <div class="check-copy">
               <strong>iCal link <span class="eyebrow">Recommended</span></strong>
               <div class="muted">Use in Apple Calendar or Google Calendar subscription. Static is frozen; dynamic updates when your visible personal page changes.</div>
-              <div class="modal-actions">
-                <label><input type="radio" name="export-link-mode" value="dynamic" ${state.exportLinkMode === 'dynamic' ? 'checked' : ''} /> Dynamic</label>
-                <label><input type="radio" name="export-link-mode" value="static" ${state.exportLinkMode === 'static' ? 'checked' : ''} /> Static</label>
+              <div class="modal-actions export-link-actions">
+                <div class="export-mode-switch" role="radiogroup" aria-label="Export link type">
+                  <label class="${state.exportLinkMode === 'dynamic' ? 'active' : ''}"><input type="radio" name="export-link-mode" value="dynamic" ${state.exportLinkMode === 'dynamic' ? 'checked' : ''} /> <span>Dynamic</span></label>
+                  <label class="${state.exportLinkMode === 'static' ? 'active' : ''}"><input type="radio" name="export-link-mode" value="static" ${state.exportLinkMode === 'static' ? 'checked' : ''} /> <span>Static</span></label>
+                </div>
                 <button class="primary" data-action="generate-export-link">Generate link</button>
               </div>
               ${state.exportLinkUrl ? `<div class="meta-list"><input value="${escapeHtml(state.exportLinkUrl)}" readonly data-export-link-value /><div class="modal-actions"><button data-action="copy-export-link">Copy link</button><a class="button" href="${escapeHtml(state.exportLinkUrl)}" target="_blank" rel="noreferrer">Open link</a></div></div>` : ''}
             </div>
           </article>
-          <article class="check-row">
+          <article class="check-row export-card export-card--compact">
             <div class="check-copy">
-              <strong>File export</strong>
-              <div class="muted">Download the current visible personal calendar as standalone files.</div>
-              <div class="modal-actions">
-                <button class="primary" data-action="download-export-ics">Download iCal file</button>
-                <button data-action="download-export-csv">Download CSV file</button>
+              <div class="export-row-heading">
+                <strong>File export</strong>
+                <div class="modal-actions export-inline-actions">
+                  <button class="primary" data-action="download-export-ics">Download iCal file</button>
+                  <button data-action="download-export-csv">Download CSV file</button>
+                </div>
               </div>
             </div>
           </article>
-          <article class="check-row">
+          <article class="check-row export-card export-card--compact">
             <div class="check-copy">
-              <strong>PDF</strong>
-              <div class="muted">Month view only. Includes timeline names, TimeGrid name and website, and author metadata.</div>
-              <div class="modal-actions">
-                <label>Year
-                  <input type="number" min="2000" max="2100" value="${escapeHtml(state.exportYear)}" data-action="export-year" />
-                </label>
-                <button class="primary" data-action="download-export-pdf">Download Month PDF</button>
+              <div class="export-row-heading">
+                <strong>PDF</strong>
+                <div class="modal-actions export-inline-actions export-pdf-actions">
+                  <label>Year
+                    <input type="number" min="2000" max="2100" value="${escapeHtml(state.exportYear)}" data-action="export-year" />
+                  </label>
+                  <button class="primary" data-action="download-export-pdf">Download Month PDF</button>
+                </div>
               </div>
             </div>
           </article>
-        </div>
-        <div class="modal-actions">
-          <button data-action="close-export">Close</button>
         </div>
       </div>
     </div>`;
@@ -649,22 +819,47 @@ function bindExportActions() {
 function currentTopSection() {
   if (page === 'community' || page === 'community-profile') return 'community';
   if (page === 'published' || page === 'published-detail' || page === 'published-embed') return 'published';
-  if ((page === 'personal' || page === 'creator' || page === 'archive' || page === 'timeline') && currentAcct() === 'official') return 'official';
-  if (page === 'creator' || page === 'timeline') return 'creator';
+  if (page === 'official' && currentAcct() === 'official') return 'official';
+  if (page === 'timeline') return currentTimelineOrigin();
+  if (page === 'creator') return 'creator';
   if (page === 'archive') return 'archive';
   return 'personal';
 }
 
-function topNavAcct() {
-  if (page === 'personal' || page === 'creator' || page === 'archive' || page === 'timeline') return currentAcct() || state.me?.acct || '';
+function currentTimelineOrigin() {
+  const raw = new URLSearchParams(window.location.search).get('from') || window.sessionStorage.getItem('timegrid_timeline_origin') || 'personal';
+  return raw === 'creator' ? 'creator' : 'personal';
+}
+
+function rememberTimelineOrigin(origin = currentTopSection()) {
+  const value = origin === 'creator' ? 'creator' : 'personal';
+  window.sessionStorage.setItem('timegrid_timeline_origin', value);
+  return value;
+}
+
+function withTimelineOrigin(url, origin = currentTopSection()) {
+  if (!url || url === '#') return url;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    parsed.searchParams.set('from', rememberTimelineOrigin(origin));
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch (_error) {
+    return url;
+  }
+}
+
+function topNavAcct(section = '') {
+  if (section === 'official') return 'official';
+  if (page === 'official') return state.me?.acct || currentAcct() || '';
+  if (page === 'personal' || page === 'creator' || page === 'official' || page === 'archive' || page === 'timeline') return currentAcct() || state.me?.acct || '';
   return state.me?.acct || '';
 }
 
 function topNavHref(section) {
-  const acct = topNavAcct();
+  const acct = topNavAcct(section);
   if (section === 'community') return '/people';
   if (section === 'published') return '/published';
-  if (section === 'official') return '/u/official/creator';
+  if (section === 'official') return '/u/official/official';
   if (!acct) return loginHref(window.location.pathname || '/');
   if (section === 'creator') return `/u/${encodeURIComponent(acct)}/creator`;
   if (section === 'archive') return `/u/${encodeURIComponent(acct)}/archive`;
@@ -682,14 +877,30 @@ function sectionNav() {
   ];
   if (state.me?.is_admin) tabs.push({ key: 'official', label: 'Official' });
   return `
-    <nav class="section-nav" aria-label="Primary sections">
-      ${tabs.map((tab) => `<a class="section-nav__link ${current === tab.key ? 'active' : ''}" href="${topNavHref(tab.key)}">${tab.label}</a>`).join('')}
+    <nav class="section-nav" aria-label="Primary sections" data-section-nav>
+      <span class="section-nav__indicator" aria-hidden="true"></span>
+      ${tabs.map((tab) => {
+        const editorMarker = page === 'timeline' && tab.key === current ? '<small>Editor</small>' : '';
+        return `<a class="section-nav__link ${current === tab.key ? 'active' : ''}" data-section-key="${tab.key}" href="${topNavHref(tab.key)}">${tab.label}${editorMarker}</a>`;
+      }).join('')}
     </nav>`;
 }
 
+function positionSectionIndicator() {
+  const nav = document.querySelector('[data-section-nav]');
+  const active = nav?.querySelector('.section-nav__link.active');
+  if (!nav || !active) return;
+  const navRect = nav.getBoundingClientRect();
+  const activeRect = active.getBoundingClientRect();
+  nav.style.setProperty('--nav-indicator-left', `${activeRect.left - navRect.left}px`);
+  nav.style.setProperty('--nav-indicator-width', `${activeRect.width}px`);
+}
+
+window.addEventListener('resize', () => requestAnimationFrame(positionSectionIndicator));
+
 function isOfficialRegistryMode() {
   const user = state.personal?.user;
-  return currentWorkspaceMode() === 'creator' && user?.is_admin && user?.acct === 'official';
+  return page === 'official' && currentWorkspaceMode() === 'creator' && user?.is_admin && user?.acct === 'official';
 }
 
 function parseHashtagText(value) {
@@ -792,16 +1003,42 @@ function officialDraftRowMarkup(index) {
     </tr>`;
 }
 
+function toolbarMoreMenu() {
+  return `<div class="toolbar-menu-wrap">
+    <button type="button" class="button icon-button more-button" data-action="toggle-action-menu" aria-label="More actions"><span class="more-icon" aria-hidden="true"><span></span><span></span><span></span></span></button>
+    ${state.actionMenuOpen ? `<div class="toolbar-menu" role="menu">
+      <button type="button" role="menuitem" data-action="open-merge-tool">Merge & separate</button>
+    </div>` : ''}
+  </div>`;
+}
+
+function colorSwatches(id, currentColor, title = '') {
+  const palette = ['#2a9d8f', '#577590', '#3bb8ba', '#c06c84', '#8a5a3b', '#7c6ee6', '#e76f51', '#146c73'];
+  const color = timelineColor(currentColor);
+  const colors = [color, ...palette.filter((item) => item.toLowerCase() !== color.toLowerCase())].slice(0, 6);
+  const open = state.colorMenuOpenId === id;
+  return `<div class="color-menu-wrap">
+    <button type="button" class="color-menu-button" data-action="toggle-color-menu" data-id="${escapeHtml(id)}" style="--swatch-color:${escapeHtml(color)}" aria-label="Timeline color for ${escapeHtml(title)}" aria-expanded="${open}"></button>
+    ${open ? `<div class="color-menu" role="radiogroup" aria-label="Timeline color for ${escapeHtml(title)}">
+      ${colors.map((item) => `<button type="button" class="color-swatch ${item.toLowerCase() === color.toLowerCase() ? 'active' : ''}" data-action="subscription-color-choice" data-id="${escapeHtml(id)}" data-color="${escapeHtml(item)}" style="--swatch-color:${escapeHtml(item)}" aria-label="Use ${escapeHtml(item)}" aria-checked="${item.toLowerCase() === color.toLowerCase()}" role="radio"></button>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+
 function personalToolbar() {
   const me = state.me;
   const user = state.personal.user;
   const creatorMode = currentWorkspaceMode() === 'creator';
   const archiveMode = currentWorkspaceMode() === 'archive';
+  const moreMenu = toolbarMoreMenu();
+  const newTimelineAction = `<a class="button primary toolbar-main-action toolbar-create-action" href="${withTimelineOrigin(`/u/${encodeURIComponent(user.acct)}/timelines/new`, currentTopSection())}">Create a new timeline</a>`;
+  const importAction = `<button class="button tinted toolbar-main-action toolbar-import-action" type="button" data-action="open-import-menu">Import</button>`;
+  const exportAction = `<button class="button toolbar-export-action" type="button" data-action="open-export">Export</button>`;
   const actions = user.is_owner ? (creatorMode
-    ? `<a class="button primary" href="/u/${encodeURIComponent(user.acct)}/timelines/new">Create a new timeline</a><button data-action="import-personal">Import file</button><button data-action="open-merge-tool">Merge & separate</button><button class="primary" data-action="open-publish">Publish</button>`
+    ? `${newTimelineAction}${importAction}<button class="primary toolbar-publish-action" data-action="open-publish">Publish</button>${moreMenu}`
     : archiveMode
       ? ''
-      : `<a class="button primary" href="/u/${encodeURIComponent(user.acct)}/timelines/new">Create a new timeline</a><button data-action="import-personal">Import file</button><button data-action="open-merge-tool">Merge & separate</button><button data-action="open-export">Export</button>`)
+      : `${newTimelineAction}${importAction}${exportAction}${moreMenu}`)
     : '';
   return `
     <header class="topbar">
@@ -811,10 +1048,9 @@ function personalToolbar() {
           <div class="brand-title-row">
             <h1>${escapeHtml(user.display_name || user.acct)}</h1>
           </div>
-          <p>${creatorMode ? 'Creator management for publishing, creator-owned timelines, and contributor-managed bundles.' : archiveMode ? 'Archive page for timelines you no longer need to update or edit.' : 'Personal calendar workspace with subscriptions, visibility, trash, and editable self-owned timelines.'}</p>
         </div>
         <div class="topbar-utility">
-          <button data-action="logout">Sign out @${escapeHtml(me.acct)}</button>
+          <button data-action="logout">Sign out</button>
           ${notificationsButton()}
         </div>
       </div>
@@ -824,64 +1060,69 @@ function personalToolbar() {
 }
 
 function subscriptionCard(item) {
-  const bundleChildren = item.is_bundle ? (item.components || []) : [];
-  const creatorMode = currentWorkspaceMode() === 'creator';
-  const archiveMode = currentWorkspaceMode() === 'archive';
+  const color = timelineColor(item.color || '#146c73');
+  const isVisible = item.visible !== false;
+  const creatorMode = page === 'creator' || page === 'official';
+  const archiveMode = page === 'archive';
   const editControl = item.edit_url
-    ? `<a class="button" href="${escapeHtml(item.edit_url)}">Edit</a>`
+    ? `<a class="button" href="${escapeHtml(withTimelineOrigin(item.edit_url, currentTopSection()))}">Edit</a>`
     : item.editable_shell
-      ? `<button data-action="edit-subscription" data-id="${item.id}">Edit</button>`
+      ? `<button type="button" data-action="edit-subscription" data-id="${item.id}">Edit</button>`
       : '';
-  return `
-    <article class="sub-card ${item.visible ? 'active' : ''}">
+  const toggleControl = `<button type="button" data-action="toggle-visible" data-id="${item.id}" data-visible="${String(!isVisible)}">${isVisible ? 'Hide' : 'Show'}</button>`;
+  const trashControl = `<button type="button" class="danger" data-action="trash" data-id="${item.id}">Trash</button>`;
+  const moveControl = archiveMode
+    ? `<button type="button" data-action="move-workspace" data-id="${item.id}" data-workspace="creator">Move to Creator manager</button>`
+    : creatorMode
+      ? `${item.archive_allowed ? `<button type="button" data-action="move-workspace" data-id="${item.id}" data-workspace="archive">Move to Archive</button>` : ''}<button type="button" data-action="detach-delete" data-id="${item.id}">Detach&delete</button><button type="button" class="danger" data-action="permanent-delete" data-id="${item.id}">Permanent delete</button>`
+      : `<button type="button" data-action="move-workspace" data-id="${item.id}" data-workspace="creator">Move to Creator manager</button>`;
+  const moreControl = moveControl ? `<details class="sub-more"><summary aria-label="More actions"><span class="more-icon" aria-hidden="true"><span></span><span></span><span></span></span></summary><div class="sub-more-menu">${moveControl}</div></details>` : '';
+  const cardClass = item.is_bundle ? 'sub-card bundle-card active' : 'sub-card active';
+  if (item.is_bundle) {
+    return `<article class="${cardClass}" style="--timeline-color:${color}">
       <header>
         <div>
           <strong>${escapeHtml(item.title)}</strong>
-          <div class="muted">${item.is_bundle ? `Merged timeline with ${item.component_count || 0} hidden internal timelines` : item.owned_timeline_id ? 'Self-owned timeline feed' : item.editable_shell ? 'External timeline with editable shell support' : item.visible ? 'Visible in calendar' : 'Hidden from calendar'}</div>
-          ${item.availability_note ? `<div class="muted unavailable-note">${escapeHtml(item.availability_note)}</div>` : ''}
-          <div class="row"><input type="color" class="color-picker" data-action="subscription-color" data-id="${item.id}" value="${escapeHtml(item.color || '#1f7a8c')}" aria-label="Timeline color for ${escapeHtml(item.title)}" /></div>
+          <div class="sub-meta-row">${subscriptionKindBadge(item)}</div>
         </div>
         <div class="sub-actions">
-          ${archiveMode ? '' : editControl}
-          ${creatorMode
-            ? `${item.archive_allowed ? `<button data-action="move-workspace" data-id="${item.id}" data-workspace="archive">Archive</button>` : ''}<button data-action="detach-delete" data-id="${item.id}">Detach&delete</button><button class="danger" data-action="permanent-delete" data-id="${item.id}">Permanent delete</button>`
-            : archiveMode
-              ? `<button data-action="move-workspace" data-id="${item.id}" data-workspace="creator">Move to creator</button>`
-              : `<button data-action="move-workspace" data-id="${item.id}" data-workspace="creator">Creator manage</button>`}
-          <button data-action="toggle-visible" data-id="${item.id}">${item.visible ? 'Hide' : 'Show'}</button>
-          ${creatorMode || archiveMode ? '' : `<button class="danger" data-action="trash" data-id="${item.id}">Trash</button>`}
+          ${editControl}${toggleControl}${archiveMode ? '' : trashControl}${moreControl}
         </div>
       </header>
-      ${item.is_bundle ? `
-        <details class="bundle-list">
-          <summary>Contains ${bundleChildren.length} timelines</summary>
-          <div class="bundle-items">
-            ${bundleChildren.map((child) => `
-              <div class="bundle-item">
-                <strong>${escapeHtml(child.title)}</strong>
-                ${child.author_name ? `<div class="muted">Author: ${escapeHtml(child.author_name)}</div>` : ''}
-                ${child.url ? `<a class="sub-url" href="${escapeHtml(child.url)}" target="_blank" rel="noreferrer">${escapeHtml(child.url)}</a>` : '<div class="muted">No direct link</div>'}
-              </div>`).join('') || '<div class="empty">No internal timelines yet.</div>'}
-          </div>
-        </details>` : `<a class="sub-url" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>`}
+      <details>
+        <summary>Included calendars</summary>
+        ${(item.children || []).map((child) => `<div class="bundle-child"><span>${escapeHtml(child.title)}</span><a href="${child.url}">${escapeHtml(child.url)}</a></div>`).join('')}
+      </details>
     </article>`;
+  }
+  return `<article class="${cardClass}" style="--timeline-color:${color}">
+    <header>
+      <div>
+        <strong>${escapeHtml(item.title)}</strong>
+        <div class="sub-meta-row">${subscriptionKindBadge(item)}${colorSwatches(item.id, color, item.title)}</div>
+      </div>
+      <div class="sub-actions">
+        ${editControl}${toggleControl}${archiveMode ? '' : trashControl}${moreControl}
+      </div>
+    </header>
+  </article>`;
 }
 
 function trashCard(item) {
+  const color = timelineColor(item.color || item.source_color || '#146c73');
   return `
-    <article class="trash-card">
+    <article class="trash-card" style="--timeline-color:${color}">
       <header>
         <div>
           <strong>${escapeHtml(item.title)}</strong>
-          <div class="muted">${item.is_bundle ? 'Merged folder moved to trash' : 'Moved to trash'}</div>
+          <div class="sub-meta-row">${subscriptionKindBadge(item)}<span class="timeline-color-dot" aria-label="Timeline color" style="background:${color}"></span></div>
         </div>
         <div class="sub-actions">
-          ${item.edit_url ? `<a class="button" href="${escapeHtml(item.edit_url)}">Edit</a>` : ''}
+          ${item.edit_url ? `<a class="button" href="${escapeHtml(withTimelineOrigin(item.edit_url, currentTopSection()))}">Edit</a>` : ''}
           <button data-action="restore" data-id="${item.id}">Restore</button>
           <button class="danger" data-action="delete" data-id="${item.id}">Delete</button>
         </div>
       </header>
-      ${item.url ? `<a class="sub-url" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>` : ''}
     </article>`;
 }
 
@@ -977,6 +1218,48 @@ function timelineMiniCard(item) {
       </header>
       <a class="share-link" href="${escapeHtml(item.ics_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.ics_url)}</a>
     </article>`;
+}
+
+
+function subscriptionKindBadge(item) {
+  let label = 'External';
+  if (item.is_bundle) label = 'Bundle';
+  else if (item.is_self_owned || item.owned_timeline_id) label = 'Self-owned';
+  else if (item.editable_shell) label = 'Editable shell';
+  else if (item.visible === false) label = 'Hidden';
+  return `<span class="status-bubble">${escapeHtml(label)}</span>`;
+}
+
+function importMenuModal() {
+  if (!state.importOpen) return '';
+  return `
+    <div class="modal-backdrop" data-action="close-import-menu">
+      <div class="modal import-menu-modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">Import</div>
+            <h2>Add a subscription or import a calendar file</h2>
+            <p class="muted">Type a title and calendar URL, or import an .ics, .ical, or .csv file into a new editable timeline.</p>
+          </div>
+          <button class="modal-close" data-action="close-import-menu" aria-label="Close import menu">×</button>
+        </div>
+        <form id="import-form" class="import-menu-form">
+          <label>
+            <div class="muted">Title</div>
+            <input name="title" placeholder="Subscription title" />
+          </label>
+          <label>
+            <div class="muted">Calendar URL</div>
+            <input name="url" placeholder="https://...ics or https://calendar.time-grid.org/p/..." />
+          </label>
+          <div class="modal-actions import-menu-actions">
+            <button class="primary" type="submit">Add subscription</button>
+            <button type="button" data-action="import-personal">Import calendar files</button>
+            <button type="button" data-action="close-import-menu">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
 }
 
 function mergeToolModal() {
@@ -1128,57 +1411,51 @@ function renderPersonal() {
   const user = state.personal.user;
   const creatorMode = currentWorkspaceMode() === 'creator';
   const archiveMode = currentWorkspaceMode() === 'archive';
-  const subscriptionLabel = creatorMode ? 'Creator managed timelines' : archiveMode ? 'Archived timelines' : 'Subscriptions';
-  const workspaceLabel = creatorMode ? 'Creator management' : archiveMode ? 'Archive page' : 'Personal page';
-  const timelineLabel = creatorMode ? 'Editable timelines in creator management' : archiveMode ? 'Archived timelines' : 'Timelines created by me';
+  const subscriptionLabel = archiveMode ? 'Archived timelines' : 'Subscriptions';
+  const workspaceLabel = creatorMode ? 'Creator page' : archiveMode ? 'Archive page' : 'Personal page';
+  const timelineLabel = archiveMode ? 'Archived timelines' : 'Timelines created by me';
   root.innerHTML = `
     <div class="page-shell">
       ${personalToolbar()}
-      <div class="grid">
-        <aside class="sidebar">
-          <section>
-            <div class="section-header">
-              <h2>${subscriptionLabel}</h2>
-              <span class="muted">${state.personal.subscriptions.length}</span>
+      <div class="grid workspace-grid">
+        <aside class="sidebar workspace-sidebar">
+          <section class="sidebar-section subscriptions-panel">
+            <div class="section-header subscriptions-section-header">
+              <h2>${subscriptionLabel} <span class="section-count">${state.personal.subscriptions.length}</span></h2>
+              ${archiveMode || !state.personal.subscriptions.length ? '' : `<button type="button" class="subtle" data-action="toggle-all-visible" data-visible="${String(!state.personal.subscriptions.every((item) => item.visible !== false))}">${state.personal.subscriptions.every((item) => item.visible !== false) ? 'Hide all' : 'Show all'}</button>`}
             </div>
-            ${creatorMode ? '<div class="empty">Creator-managed timelines stay here even if they no longer belong in the personal workspace.</div>' : archiveMode ? '<div class="empty">Archived timelines stay on the server but are not meant for active editing.</div>' : `
-            <form id="add-form" class="meta-list">
-              <input name="title" placeholder="Subscription title" />
-              <input name="url" placeholder="https://...ics or https://calendar.time-grid.org/p/..." />
-              <button class="primary" type="submit">Add subscription</button>
-            </form>`}
-          </section>
-          <section>
+            ${state.personal.subscriptions.length ? '' : (archiveMode ? '<div class="empty">Archived timelines stay on the server but are not meant for active editing.</div>' : '<div class="muted sidebar-note">Use Import to add a URL or calendar file.</div>')}
             <div class="sub-list">
-              ${state.personal.subscriptions.length ? state.personal.subscriptions.map(subscriptionCard).join('') : `<div class="empty">${creatorMode ? 'No creator-managed timelines yet.' : archiveMode ? 'No archived timelines yet.' : 'No subscriptions yet. Add holiday links, F1 schedules, or other TimeGrid pages here.'}</div>`}
+              ${state.personal.subscriptions.length ? state.personal.subscriptions.map(subscriptionCard).join('') : `<div class="empty">${archiveMode ? 'No archived timelines yet.' : 'No subscriptions yet. Add holiday links, F1 schedules, or other TimeGrid pages here.'}</div>`}
             </div>
           </section>
-          ${creatorMode || archiveMode ? '' : `<section>
-            <div class="section-header">
-              <h3>Trash</h3>
-              <span class="muted">${state.personal.trash.length}</span>
+          ${archiveMode ? '' : `<section class="sidebar-section">
+            <div class="section-header trash-section-header">
+              <h3>Trash <span class="section-count">${state.personal.trash.length}</span></h3>
+              <button class="danger" data-action="empty-trash" ${state.personal.trash.length ? '' : 'disabled'}>Empty trash</button>
             </div>
             <div class="sub-list">
               ${state.personal.trash.length ? state.personal.trash.map(trashCard).join('') : '<div class="empty">Trash is empty.</div>'}
             </div>
           </section>`}
         </aside>
-        <main class="main-panel">
+        <main class="main-panel workspace-main">
           <div class="calendar-stage">
             ${mastodonProvisioningBanner()}
             ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
-            ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
-            <section>
-              <div class="section-header">
+            <section class="calendar-view-section">
+              <div class="section-header calendar-view-header">
                 <div>
                   <div class="eyebrow">${workspaceLabel}</div>
-                  <h2>@${escapeHtml(user.acct)} calendar</h2>
                 </div>
-                
+                <div class="view-meta">
+                  <span>${state.personal.visible_sources?.length || 0} visible</span>
+                  <span>${state.personal.subscriptions.length} sources</span>
+                </div>
               </div>
               ${state.personal.visible_sources?.length ? '<div id="personal-calendar-hint" class="calendar-tip hidden"></div><div id="personal-calendar" class="readonly-calendar-shell"></div>' : `<div class="empty">${archiveMode ? 'Archive page does not provide editing controls, but visibility can still show what remains on the server.' : 'Turn on visibility for at least one subscription to render the calendar.'}</div>`}
             </section>
-            <section>
+            <section class="workspace-section">
               <div class="section-header">
                 <h3>${timelineLabel}</h3>
                 ${archiveMode ? '' : `<a class="button" href="/u/${encodeURIComponent(user.acct)}/timelines/new">New timeline</a>`}
@@ -1187,16 +1464,7 @@ function renderPersonal() {
                 ${state.personal.timelines.length ? state.personal.timelines.map(timelineMiniCard).join('') : `<div class="empty">${archiveMode ? 'No archived timelines yet.' : 'No self-owned timelines yet.'}</div>`}
               </div>
             </section>
-            ${creatorMode ? `<section>
-              <div class="section-header">
-                <h3>Published by this user</h3>
-                <span class="muted">Manage public, invited, and private access</span>
-              </div>
-              <div class="public-list">
-                ${state.personal.published.length ? state.personal.published.map((item) => publishCard(item, { manage: true })).join('') : '<div class="empty">No published bundles yet. Click Publish to create one merged share link.</div>'}
-              </div>
-            </section>` : ''}
-            ${archiveMode ? `<section>
+            ${archiveMode ? `<section class="workspace-section">
               <div class="section-header">
                 <h3>Archived published timelines</h3>
                 <span class="muted">Published bundles kept for current subscribers without active management</span>
@@ -1209,6 +1477,7 @@ function renderPersonal() {
         </main>
       </div>
       ${exportModal()}
+      ${importMenuModal()}
       ${creatorMode ? publishModal() : ''}
       ${mergeToolModal()}
       ${creatorMode ? publishedManageModal() : ''}
@@ -1228,7 +1497,6 @@ function renderPersonal() {
         <div class="calendar-stage">
           ${mastodonProvisioningBanner()}
           ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
-          ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
           ${officialRegistryTableMarkup()}
         </div>`;
     }
@@ -1241,13 +1509,27 @@ function renderPersonal() {
   bindExportActions();
   document.querySelector('[data-action="open-merge-tool"]')?.addEventListener('click', () => {
     state.mergeToolOpen = true;
+    state.actionMenuOpen = false;
     state.mergeToolSourceId = state.personal?.subscriptions?.find((item) => item.is_bundle)?.id || '';
+    render();
+  });
+  document.querySelector('[data-action="toggle-action-menu"]')?.addEventListener('click', () => {
+    state.actionMenuOpen = !state.actionMenuOpen;
     render();
   });
   document.querySelector('[data-action="open-publish"]')?.addEventListener('click', () => {
     state.publishOpen = true;
     render();
   });
+  document.querySelector('[data-action="open-import-menu"]')?.addEventListener('click', () => {
+    state.importOpen = true;
+    state.actionMenuOpen = false;
+    render();
+  });
+  document.querySelectorAll('[data-action="close-import-menu"]').forEach((node) => node.addEventListener('click', () => {
+    state.importOpen = false;
+    render();
+  }));
   document.querySelector('[data-action="import-personal"]')?.addEventListener('click', () => {
     document.getElementById('personal-import-input')?.click();
   });
@@ -1256,7 +1538,8 @@ function renderPersonal() {
     event.target.value = '';
     if (!file) return;
     try {
-      const data = await importTimelineFromFile(file, 'personal');
+      const data = await importTimelineFromFile(file, page === 'creator' ? 'creator' : 'personal');
+      state.importOpen = false;
       if (data?.timeline?.edit_url) setBanner(`Imported ${file.name} as a new editable timeline. Edit: ${data.timeline.edit_url}`);
     } catch (error) {
       setBanner('', error.message);
@@ -1268,6 +1551,11 @@ function renderPersonal() {
     render();
   }));
   document.getElementById('separate-source')?.addEventListener('change', (event) => { state.mergeToolSourceId = event.target.value; render(); });
+  document.querySelectorAll('[data-action="toggle-color-menu"]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    state.colorMenuOpenId = state.colorMenuOpenId === button.dataset.id ? '' : (button.dataset.id || '');
+    renderPersonal();
+  }));
   document.querySelectorAll('[data-action="close-modal"]').forEach((node) => node.addEventListener('click', () => {
     state.publishOpen = false;
     render();
@@ -1286,7 +1574,7 @@ function renderPersonal() {
       setBanner('', error.message);
     }
   }));
-  document.getElementById('add-form')?.addEventListener('submit', async (event) => {
+  document.getElementById('import-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
@@ -1295,6 +1583,7 @@ function renderPersonal() {
         body: JSON.stringify({ title: form.get('title') || '', url: form.get('url') || '' }),
       });
       await loadWorkspace();
+      state.importOpen = false;
       setBanner('Subscription added.');
     } catch (error) {
       setBanner('', error.message);
@@ -1313,6 +1602,21 @@ function renderPersonal() {
       setBanner('', error.message);
     }
   }));
+  document.querySelector('[data-action="toggle-all-visible"]')?.addEventListener('click', async (event) => {
+    try {
+      const visible = event.currentTarget.dataset.visible === 'true';
+      for (const item of state.personal.subscriptions) {
+        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(item.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ visible }),
+        });
+      }
+      await loadWorkspace();
+      setBanner('Visibility updated.');
+    } catch (error) {
+      setBanner('', error.message);
+    }
+  });
   document.querySelectorAll('[data-action="move-workspace"]').forEach((button) => button.addEventListener('click', async () => {
     try {
       const workspace = button.dataset.workspace || 'personal';
@@ -1326,14 +1630,18 @@ function renderPersonal() {
       setBanner('', error.message);
     }
   }));
-  document.querySelectorAll('[data-action="subscription-color"]').forEach((input) => input.addEventListener('input', async () => {
-    const nextColor = input.value;
+  document.querySelectorAll('[data-action="subscription-color-choice"]').forEach((input) => input.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const nextColor = timelineColor(input.dataset.color || '');
     try {
+      updateSubscriptionColorState(input.dataset.id, nextColor);
+      updateSubscriptionColorDom(input.dataset.id, nextColor);
+      state.colorMenuOpenId = '';
+      renderPersonal();
       await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${input.dataset.id}`, {
         method: 'PATCH',
         body: JSON.stringify({ color: nextColor }),
       });
-      updateSubscriptionColorState(input.dataset.id, nextColor);
       await refreshWorkspaceCalendarColors();
       showToast('Color updated');
     } catch (error) {
@@ -1391,6 +1699,21 @@ function renderPersonal() {
       setBanner('', error.message);
     }
   }));
+  document.querySelector('[data-action="empty-trash"]')?.addEventListener('click', async () => {
+    const items = state.personal?.trash || [];
+    if (!items.length) return;
+    const ok = window.confirm('Delete all trashed timelines permanently from the server?');
+    if (!ok) return;
+    try {
+      for (const item of items) {
+        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(item.id)}?mode=permanent`, { method: 'DELETE' });
+      }
+      await loadWorkspace();
+      setBanner('Timeline permanently deleted from the server.');
+    } catch (error) {
+      setBanner('', error.message);
+    }
+  });
   document.querySelector('[data-action="submit-merge"]')?.addEventListener('click', async () => {
     const title = document.getElementById('merge-title').value.trim();
     const selected = Array.from(document.querySelectorAll('[data-merge-sub]:checked')).map((node) => node.value);
@@ -1668,6 +1991,134 @@ function recurrenceSummary(event) {
   return `Repeats ${freq}${days}${until}`;
 }
 
+
+function isRecurringTimelineEvent(event) {
+  return !!event?.recurrence?.freq;
+}
+
+function timelineEventGroupId(event) {
+  return event?.series_group_id || event?.id || '';
+}
+
+function timelineSingleEvents() {
+  return (state.timeline?.events || []).filter((item) => !isRecurringTimelineEvent(item));
+}
+
+function timelineSeriesGroups() {
+  const groups = new Map();
+  (state.timeline?.events || []).filter(isRecurringTimelineEvent).forEach((item) => {
+    const id = timelineEventGroupId(item);
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(item);
+  });
+  return Array.from(groups.entries()).map(([id, items]) => {
+    const sorted = items.sort((a, b) => new Date(a.start) - new Date(b.start));
+    const title = sorted.find((item) => item.title)?.title || 'Untitled series';
+    return { id, title, items: sorted };
+  });
+}
+
+function eventEditModal() {
+  const modal = state.eventEditModal;
+  if (!modal?.id) return '';
+  if (modal.kind === 'skipper') return skipperModal(modal.id);
+  if (modal.kind === 'series') return seriesManageModal(modal.id);
+  return singleEventEditModal(modal.id);
+}
+
+function editModalShell(title, body) {
+  return `
+    <div class="modal-backdrop" data-action="close-event-editor">
+      <div class="modal event-edit-modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          <div><div class="eyebrow">Creator editor</div><h2>${escapeHtml(title)}</h2></div>
+          <button class="modal-close" data-action="close-event-editor" aria-label="Close editor">×</button>
+        </div>
+        ${body}
+      </div>
+    </div>`;
+}
+
+function singleEventEditModal(eventId) {
+  const item = (state.timeline?.events || []).find((entry) => entry.id === eventId);
+  if (!item) return '';
+  const disabled = item.editable === false ? 'disabled' : '';
+  return editModalShell(item.editable === false ? 'View single event' : 'Edit single event', `
+    ${item.editable === false ? '<div class="banner">This source is read-only.</div>' : ''}
+    <div class="event-form-grid modal-event-form" data-single-event-id="${escapeHtml(item.id)}">
+      <label><div class="muted">Title</div><input id="modal-event-title" value="${escapeHtml(item.title || '')}" ${disabled} /></label>
+      <div class="event-form-row event-form-row--split">
+        <label><div class="muted">Start</div><input id="modal-event-start" type="datetime-local" value="${escapeHtml(formDateTimeValue(item.start))}" ${disabled} /></label>
+        <label><div class="muted">End</div><input id="modal-event-end" type="datetime-local" value="${escapeHtml(formDateTimeValue(item.end))}" ${disabled} /></label>
+      </div>
+      <label><div class="muted">Location</div><input id="modal-event-location" value="${escapeHtml(item.location || '')}" ${disabled} /></label>
+      <label><div class="muted">URL</div><input id="modal-event-url" value="${escapeHtml(item.url || '')}" ${disabled} /></label>
+      <label><div class="muted">Description</div><textarea id="modal-event-description" ${disabled}>${escapeHtml(item.description || '')}</textarea></label>
+      <div class="modal-actions">
+        ${item.editable === false ? '' : '<button class="primary" data-action="save-single-event-modal">Save single event</button><button class="danger" data-action="delete-single-event-modal">Delete single event</button>'}
+        <button data-action="close-event-editor">Close</button>
+      </div>
+    </div>`);
+}
+
+function seriesManageModal(groupId) {
+  const group = timelineSeriesGroups().find((entry) => entry.id === groupId);
+  if (!group) return '';
+  const readOnly = group.items.every((item) => item.editable === false);
+  return editModalShell(readOnly ? 'View series' : 'Manage series', `
+    ${readOnly ? '<div class="banner">Every segment in this series group is read-only.</div>' : '<p class="section-copy">Use segments for breaks in the middle of a course series. Break rows stay in one series and share one title; details can change per break.</p>'}
+    <label class="series-title-field"><div class="muted">Series title</div><input id="series-shared-title" value="${escapeHtml(group.title)}" ${readOnly ? 'disabled' : ''} /></label>
+    <div class="series-segment-list" data-series-group-id="${escapeHtml(group.id)}">
+      ${group.items.map((item, index) => seriesSegmentRow(item, index)).join('')}
+    </div>
+    <div class="modal-actions">
+      ${readOnly ? '' : '<button data-action="add-series-break">Add break</button><button class="primary" data-action="save-series-modal">Save series</button><button data-action="open-skipper-modal">Skipper</button><button class="danger" data-action="delete-series-group-modal">Delete series</button>'}
+      <button data-action="close-event-editor">Close</button>
+    </div>`);
+}
+
+function seriesSegmentRow(item, index) {
+  const disabled = item.editable === false ? 'disabled' : '';
+  const repeatValue = item.recurrence?.freq || 'WEEKLY';
+  return `
+    <article class="series-segment-row" data-series-row-id="${escapeHtml(item.id)}">
+      <header>
+        <strong>${index === 0 ? 'Start date / end date' : `Start date-${index} / end date-${index}`}</strong>
+        <div class="sub-actions">${item.editable === false ? '<span class="muted">Read-only</span>' : (index === 0 ? '' : '<button class="danger" data-action="remove-series-segment" data-id="' + escapeHtml(item.id) + '">Remove break</button>')}</div>
+      </header>
+      <div class="event-form-grid">
+        <div class="event-form-row event-form-row--split">
+          <label><div class="muted">Start</div><input data-field="start" type="datetime-local" value="${escapeHtml(formDateTimeValue(item.start))}" ${disabled} /></label>
+          <label><div class="muted">End</div><input data-field="end" type="datetime-local" value="${escapeHtml(formDateTimeValue(item.end))}" ${disabled} /></label>
+        </div>
+        <div class="event-form-row event-form-row--split">
+          <label><div class="muted">Repeat frequency</div><select data-field="repeat" ${disabled}><option value="WEEKLY" ${repeatValue === 'WEEKLY' ? 'selected' : ''}>Weekly</option><option value="DAILY" ${repeatValue === 'DAILY' ? 'selected' : ''}>Daily</option></select></label>
+          <label><div class="muted">Repeat until</div><input data-field="until" type="date" value="${escapeHtml(recurrenceUntilDateValue(item.recurrence?.until || ''))}" ${disabled} /></label>
+        </div>
+        <label><div class="muted">Location</div><input data-field="location" value="${escapeHtml(item.location || '')}" ${disabled} /></label>
+        <label><div class="muted">URL</div><input data-field="url" value="${escapeHtml(item.url || '')}" ${disabled} /></label>
+        <label><div class="muted">Description</div><textarea data-field="description" ${disabled}>${escapeHtml(item.description || '')}</textarea></label>
+      </div>
+    </article>`;
+}
+
+function skipperModal(groupId) {
+  const group = timelineSeriesGroups().find((entry) => entry.id === groupId);
+  if (!group) return '';
+  const rows = group.items.flatMap((item) => (window.TimeGridCalendarDomain?.listSeriesOccurrences?.({ ...item, exdates: [] }, { limit: 80, horizonDays: 1460 }) || []).map((occurrence) => ({ item, occurrence })))
+    .sort((a, b) => new Date(a.occurrence.start) - new Date(b.occurrence.start));
+  return editModalShell('Skipper', `
+    <p class="section-copy">Uncheck a time period to skip that occurrence in this series. This is the simple gap tool.</p>
+    <div class="skipper-list" data-series-group-id="${escapeHtml(group.id)}">
+      ${rows.length ? rows.map(({ item, occurrence }) => `
+        <label class="skipper-row">
+          <input type="checkbox" data-series-id="${escapeHtml(item.id)}" data-occurrence-id="${escapeHtml(occurrence._occurrenceId || occurrence.start)}" ${(item.exdates || []).includes(occurrence._occurrenceId || occurrence.start) ? '' : 'checked'} ${item.editable === false ? 'disabled' : ''} />
+          <span><strong>${escapeHtml(occurrence.title || item.title || 'Untitled event')}</strong><small>${new Date(occurrence.start).toLocaleString()} to ${new Date(occurrence.end).toLocaleString()}</small></span>
+        </label>`).join('') : '<div class="empty">No upcoming periods found for this series.</div>'}
+    </div>
+    <div class="modal-actions"><button class="primary" data-action="save-skipper-modal">Save skipper</button><button data-action="open-series-modal" data-id="${escapeHtml(group.id)}">Back to series</button><button data-action="close-event-editor">Close</button></div>`);
+}
+
 function selectedEventReadOnly() {
   const event = selectedEvent();
   return !!(event && event.editable === false);
@@ -1757,6 +2208,9 @@ function setCalendarHint(elementId, message) {
 
 function timelineToolbar() {
   const title = state.timeline?.title || 'Timeline editor';
+  const origin = currentTimelineOrigin();
+  const backLabel = origin === 'creator' ? 'Back to creator' : 'Back to personal';
+  const backHref = `/u/${encodeURIComponent(state.timeline?.owner_acct || document.body.dataset.acct || location.pathname.split('/')[2] || '')}${origin === 'creator' ? '/creator' : ''}`;
   const intro = state.timeline?.kind === 'wrapper'
     ? 'Edit a merged timeline or shell calendar here. New events go into your own internal timeline, while existing owned child timelines stay editable in place.'
     : 'Create or import repeating course schedules, then publish them as your own ICS subscription for the personal calendar page.';
@@ -1777,30 +2231,27 @@ function timelineToolbar() {
       <div class="toolbar toolbar--context">
         <button data-action="import-editor">Import file</button>
         <button class="primary" data-action="save-timeline">Save timeline</button>
+        <button data-action="return-workspace" data-href="${escapeHtml(backHref)}">${escapeHtml(backLabel)}</button>
       </div>
     </header>`;
 }
 
 function timelineSidebarMarkup() {
-  const event = selectedEvent();
-  const context = editorContext();
-  const editingOccurrence = !!state.selectedOccurrence;
-  const readOnly = context.isReadOnly;
-  const disabled = readOnly ? 'disabled' : '';
-  const repeatValue = editingOccurrence ? 'none' : (event?.recurrence?.freq || 'none');
-  const showRepeatUntil = !editingOccurrence && repeatValue !== 'none';
-  const recurringConversion = ensureRecurrenceConversionState(event, repeatValue);
-  const recurringChoices = recurringConversion ? recurringConversionChoices(event) : [];
+  const event = state.draftEvent;
+  const readOnly = false;
+  const disabled = '';
+  const repeatValue = event?.recurrence?.freq || 'none';
+  const showRepeatUntil = repeatValue !== 'none';
   const advancedOpen = !!(event?.location || event?.url || event?.description);
+  const singles = timelineSingleEvents();
+  const seriesGroups = timelineSeriesGroups();
 
   return `
     ${mastodonProvisioningBanner()}
     ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
-    ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
     <section class="event-composer-card">
-      <div class="section-header"><h3>${escapeHtml(context.labels.panelTitle)}</h3></div>
-      <p class="section-copy">Click an event to edit it. Double-click the calendar to create a new one.</p>
-      ${editingOccurrence ? `<div class="banner">Editing only ${new Date(state.selectedOccurrence.recurrenceId).toLocaleString()}. <button data-action="switch-series">Switch to whole series</button> ${readOnly ? '' : '<button class="danger" data-action="delete-occurrence">Delete this occurrence</button>'}</div>` : (state.selectedEventId ? `<div class="banner">Series selected.${event?.source_title ? ` Source: ${escapeHtml(event.source_title)}.` : ''} ${readOnly ? 'This source is read-only. Add new events to your own overlay timeline instead.' : 'Changes below affect the corresponding source timeline.'} <button data-action="clear-event">Clear selection</button></div>` : '')}
+      <div class="section-header"><h3>Create event</h3></div>
+      <p class="section-copy">Use this panel only for adding new events. Existing single events and series are edited from their own buttons below.</p>
       ${readOnly ? '<div class="banner">Read-only source events stay visible here, but only your own internal timelines can be changed or deleted.</div>' : ''}
       <div class="event-form-grid">
         <label><div class="muted">Title</div><input id="event-title" value="${escapeHtml(event?.title || '')}" ${disabled} /></label>
@@ -1808,27 +2259,7 @@ function timelineSidebarMarkup() {
           <label><div class="muted">Start</div><input id="event-start" type="datetime-local" value="${escapeHtml(formDateTimeValue(event?.start))}" ${disabled} /></label>
           <label><div class="muted">End</div><input id="event-end" type="datetime-local" value="${escapeHtml(formDateTimeValue(event?.end))}" ${disabled} /></label>
         </div>
-        ${editingOccurrence ? '' : `<div class="event-form-row"><label><div class="muted">Repeat</div><select id="event-repeat" ${disabled}><option value="none" ${repeatValue === 'none' ? 'selected' : ''}>No repeat</option><option value="WEEKLY" ${repeatValue === 'WEEKLY' ? 'selected' : ''}>Weekly</option><option value="DAILY" ${repeatValue === 'DAILY' ? 'selected' : ''}>Daily</option></select></label><label id="event-repeat-until-wrap" class="${showRepeatUntil ? '' : 'field-hidden'}"><div class="muted">Repeat until</div><input id="event-repeat-until" type="date" value="${escapeHtml(recurrenceUntilDateValue(event?.recurrence?.until || ''))}" ${disabled} /></label></div>`}
-        ${recurringConversion ? `
-          <section class="conversion-panel">
-            <div class="muted"><strong>Convert recurring series</strong><br />This series will become standalone events. Choose what to keep before saving.</div>
-            <div class="conversion-mode-row">
-              <button type="button" class="${recurringConversion.mode === 'single' ? 'active' : ''}" data-action="conversion-mode" data-mode="single">Keep one</button>
-              <button type="button" class="${recurringConversion.mode === 'multiple' ? 'active' : ''}" data-action="conversion-mode" data-mode="multiple">Keep selected</button>
-            </div>
-            <div class="conversion-occurrence-grid">
-              ${recurringChoices.map((choice) => `
-                <button
-                  type="button"
-                  class="conversion-occurrence ${recurringConversion.occurrenceIds.includes(choice.start) ? 'active' : ''}"
-                  data-action="toggle-conversion-occurrence"
-                  data-id="${choice.start}">
-                  <span>${new Date(choice.start).toLocaleDateString()}</span>
-                  <small>${new Date(choice.start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>
-                </button>
-              `).join('')}
-            </div>
-          </section>` : ''}
+        <div class="event-form-row"><label><div class="muted">Repeat</div><select id="event-repeat" ${disabled}><option value="none" ${repeatValue === 'none' ? 'selected' : ''}>No repeat</option><option value="WEEKLY" ${repeatValue === 'WEEKLY' ? 'selected' : ''}>Weekly</option><option value="DAILY" ${repeatValue === 'DAILY' ? 'selected' : ''}>Daily</option></select></label><label id="event-repeat-until-wrap" class="${showRepeatUntil ? '' : 'field-hidden'}"><div class="muted">Repeat until</div><input id="event-repeat-until" type="date" value="${escapeHtml(recurrenceUntilDateValue(event?.recurrence?.until || ''))}" ${disabled} /></label></div>
         <details class="event-advanced"${advancedOpen ? ' open' : ''}>
           <summary>More details</summary>
           <div class="event-supporting">
@@ -1838,9 +2269,8 @@ function timelineSidebarMarkup() {
           </div>
         </details>
         <div class="event-actions">
-          ${readOnly ? '' : `<button class="primary" data-action="apply-event">${escapeHtml(context.labels.saveAction)}</button>`}
-          ${state.selectedEventId && !editingOccurrence && !readOnly ? '<button class="danger" data-action="delete-selected-series">Delete series</button>' : ''}
-          ${state.selectedEventId || state.draftEvent || state.selectedOccurrence ? '<button data-action="clear-event">Clear form</button>' : ''}
+          ${readOnly ? '' : `<button class="primary" data-action="apply-event">Add event</button>`}
+          ${state.draftEvent ? '<button data-action="clear-event">Clear form</button>' : ''}
         </div>
       </div>
     </section>
@@ -1853,25 +2283,43 @@ function timelineSidebarMarkup() {
         <a class="button" href="${escapeHtml(state.timeline.ics_url || '#')}" target="_blank" rel="noreferrer">Open ICS feed</a>
       </div>
     </details>
-    <details class="timeline-series timeline-series-card"${(state.timeline.events || []).length ? ' open' : ''}>
-      <summary>Events in this timeline</summary>
+    <details class="timeline-series timeline-series-card"${singles.length ? ' open' : ''}>
+      <summary>Single events</summary>
       <div class="sub-list">
-        ${(state.timeline.events || []).length ? state.timeline.events.map((item) => `
-          <article class="sub-card ${item.id === state.selectedEventId && !state.selectedOccurrence ? 'active' : ''}">
+        ${singles.length ? singles.map((item) => `
+          <article class="sub-card">
             <header>
               <div>
-                <strong>${escapeHtml(item.title)}</strong>
+                <strong>${escapeHtml(item.title || 'Untitled event')}</strong>
                 <div class="muted">${new Date(item.start).toLocaleString()} to ${new Date(item.end).toLocaleString()}</div>
-                <div class="muted">${escapeHtml(recurrenceSummary(item))}</div>
                 <div class="muted">${item.editable === false ? 'Read-only source' : 'Editable source'}${item.source_title ? ` • ${escapeHtml(item.source_title)}` : ''}</div>
               </div>
+              <div class="sub-actions"><button data-action="open-single-modal" data-id="${item.id}">${item.editable === false ? 'View' : 'Edit'}</button>${item.editable === false ? '' : `<button class="danger" data-action="delete-event" data-id="${item.id}">Delete</button>`}</div>
+            </header>
+          </article>`).join('') : '<div class="empty">No single events yet.</div>'}
+      </div>
+    </details>
+    <details class="timeline-series timeline-series-card"${seriesGroups.length ? ' open' : ''}>
+      <summary>Series</summary>
+      <div class="sub-list">
+        ${seriesGroups.length ? seriesGroups.map((group) => {
+          const first = group.items[0];
+          const readOnlyGroup = group.items.every((item) => item.editable === false);
+          return `
+          <article class="sub-card">
+            <header>
+              <div>
+                <strong>${escapeHtml(first.title || 'Untitled series')}</strong>
+                <div class="muted">${group.items.length} ${group.items.length === 1 ? 'segment' : 'segments'} • ${escapeHtml(recurrenceSummary(first))}</div>
+                <div class="muted">${readOnlyGroup ? 'Read-only source' : 'Editable source'}${first.source_title ? ` • ${escapeHtml(first.source_title)}` : ''}</div>
+              </div>
               <div class="sub-actions">
-                <button data-action="pick-event" data-id="${item.id}">${item.editable === false ? 'View series' : 'Edit series'}</button>
-                ${item.editable === false ? '' : `<button class="danger" data-action="delete-event" data-id="${item.id}">Delete series</button>`}
+                <button data-action="open-series-modal" data-id="${group.id}">${readOnlyGroup ? 'View series' : 'Edit series'}</button>
+                ${readOnlyGroup ? '' : `<button data-action="open-skipper-modal" data-id="${group.id}">Skipper</button><button class="danger" data-action="delete-series-group" data-id="${group.id}">Delete series</button>`}
               </div>
             </header>
-          </article>
-        `).join('') : '<div class="empty">No events yet. Drag on the calendar or click New event.</div>'}
+          </article>`;
+        }).join('') : '<div class="empty">No series yet.</div>'}
       </div>
     </details>`;
 }
@@ -1887,6 +2335,7 @@ function renderTimelineSidebarOnly() {
     state,
     renderTimeline,
     renderTimelineSidebarOnly,
+    renderTimelineEditorOnly,
     setBanner,
     saveTimeline,
     logout,
@@ -1896,6 +2345,40 @@ function renderTimelineSidebarOnly() {
     selectedEventReadOnly,
     sidebarOnly: true,
   });
+}
+
+function timelineOverlayMarkup() {
+  return `
+    ${notificationsModal()}
+    ${eventDetailModal()}
+    ${eventEditModal()}`;
+}
+
+function renderTimelineEditorOnly() {
+  const shell = document.getElementById('timeline-sidebar-shell');
+  const overlay = document.getElementById('timeline-overlay-shell');
+  if (!shell || !overlay) {
+    renderTimeline();
+    return;
+  }
+  shell.innerHTML = timelineSidebarMarkup();
+  overlay.innerHTML = timelineOverlayMarkup();
+  window.TimeGridTimelineController?.bindTimelineEditorActions?.({
+    state,
+    renderTimeline,
+    renderTimelineSidebarOnly,
+    renderTimelineEditorOnly,
+    setBanner,
+    saveTimeline,
+    logout,
+    importTimelineFromFile,
+    emptyEvent,
+    selectedSeriesEvent,
+    selectedEventReadOnly,
+    sidebarOnly: true,
+  });
+  bindNoticeActions(renderTimelineEditorOnly);
+  bindEventDetailActions();
 }
 
 function renderTimeline() {
@@ -1911,8 +2394,7 @@ function renderTimeline() {
           ${state.timelineHint ? `<div id="timeline-calendar-hint" class="calendar-tip">${escapeHtml(state.timelineHint)}</div>` : '<div id="timeline-calendar-hint" class="calendar-tip hidden"></div>'}<div id="timeline-calendar"></div>
         </main>
       </div>
-      ${notificationsModal()}
-      ${eventDetailModal()}
+      <div id="timeline-overlay-shell">${timelineOverlayMarkup()}</div>
       <input id="timeline-import-input" type="file" accept=".ics,.ical,.csv,text/calendar,text/csv" class="hidden" />
     </div>`;
 
@@ -1920,6 +2402,7 @@ function renderTimeline() {
     state,
     renderTimeline,
     renderTimelineSidebarOnly,
+    renderTimelineEditorOnly,
     setBanner,
     saveTimeline,
     logout,
@@ -1936,6 +2419,7 @@ function renderTimeline() {
 function initCalendar() {
   const el = document.getElementById('timeline-calendar');
   if (!el) return;
+  el.classList.add('is-refreshing');
   window.TimeGridScheduleXCalendar?.destroy?.(el);
   const events = expandedCalendarEvents().map((item) => ({
     ...item,
@@ -1943,7 +2427,7 @@ function initCalendar() {
   }));
   const focus = calendarFocus(events, {
     selectedDate: state.timelineDate,
-    initialView: state.timelineView,
+    initialView: state.timelineView || savedCalendarView(`timeline:${state.timeline?.id || 'new'}`) || 'dayGridMonth',
   });
   state.timelineHint = focus.hint;
   setCalendarHint('timeline-calendar-hint', state.timelineHint);
@@ -1951,8 +2435,10 @@ function initCalendar() {
     initialView: focus.initialView,
     selectedDate: (focus.selectedDate || preferredCalendarDate()).slice(0, 10),
     events,
+    weekOptions: { gridHeight: responsiveCalendarGridHeight() },
     onRangeUpdate(range) {
       state.timelineView = range.legacyView || state.timelineView;
+      saveCalendarView(`timeline:${state.timeline?.id || 'new'}`, state.timelineView);
       state.timelineDate = range.startIso || state.timelineDate;
       state.timelineHint = calendarGapHint(events, range.startIso || '', range.endIso || '');
       setCalendarHint('timeline-calendar-hint', state.timelineHint);
@@ -1982,7 +2468,9 @@ function initCalendar() {
       state.selectedOccurrence = occurrenceId ? { recurrenceId: occurrenceId } : null;
       state.draftEvent = null;
       state.recurrenceConversion = null;
-      renderTimelineSidebarOnly();
+      const base = state.timeline?.events?.find((item) => item.id === seriesId);
+      state.eventEditModal = base?.recurrence?.freq ? { kind: 'series', id: timelineEventGroupId(base) } : { kind: 'single', id: seriesId };
+      renderTimelineEditorOnly();
     },
     onEventClick(event) {
       const parsedEventId = window.TimeGridCalendarDomain?.parseOccurrenceEventId?.(event.id) || { seriesId: String(event.id || ''), occurrenceId: '' };
@@ -1992,13 +2480,16 @@ function initCalendar() {
       state.selectedOccurrence = occurrenceId ? { recurrenceId: occurrenceId } : null;
       state.draftEvent = null;
       state.recurrenceConversion = null;
-      renderTimelineSidebarOnly();
+      const base = state.timeline?.events?.find((item) => item.id === seriesId);
+      state.eventEditModal = base?.recurrence?.freq ? { kind: 'series', id: timelineEventGroupId(base) } : { kind: 'single', id: seriesId };
+      renderTimelineEditorOnly();
     },
     enableDragAndDrop: false,
     enableResize: false,
     enableEventModal: false,
     useNativeEventModal: false,
   }) || null;
+  requestAnimationFrame(() => el.classList.remove('is-refreshing'));
 }
 
 async function saveTimeline(options = {}) {
@@ -2295,7 +2786,8 @@ async function initReadonlyCalendar(elementId, sources, hintId = '') {
   }));
   if (token !== state.readonlyLoadToken) return;
   const expanded = expandEventsList(chunks.flat());
-  const focus = calendarFocus(expanded);
+  const viewScope = `${elementId}:${page}:${currentAcct() || currentPublishedSlug?.() || ''}`;
+  const focus = calendarFocus(expanded, { initialView: savedCalendarView(viewScope) || 'dayGridMonth' });
   el.innerHTML = '';
   if (window.TimeGridScheduleXCalendar?.mountReadonly) {
     setCalendarHint(hintId, focus.hint);
@@ -2307,7 +2799,9 @@ async function initReadonlyCalendar(elementId, sources, hintId = '') {
       })),
       initialView: focus.initialView,
       selectedDate: (focus.selectedDate || preferredCalendarDate()).slice(0, 10),
+      weekOptions: { gridHeight: responsiveCalendarGridHeight() },
       onRangeUpdate(range) {
+        saveCalendarView(viewScope, range?.legacyView || '');
         setCalendarHint(hintId, calendarGapHint(
           expanded,
           range?.startIso || '',
@@ -2338,11 +2832,15 @@ async function parseImportFile(file) {
 async function importTimelineFromFile(file, mode) {
   const parsed = await parseImportFile(file);
   if (!parsed.events.length) throw new Error('No valid events found in the imported file.');
-  if (mode === 'personal') {
+  if (mode === 'personal' || mode === 'creator') {
     const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/timelines`, {
       method: 'POST',
       body: JSON.stringify({ title: parsed.title, description: `Imported from ${file.name}`, events: parsed.events }),
     });
+    if (mode === 'creator') {
+      window.location.href = data.timeline?.edit_url || `/u/${encodeURIComponent(currentAcct())}/creator`;
+      return data;
+    }
     await loadWorkspace();
     setBanner(`Imported ${file.name} as a new editable timeline.`);
     return data;
@@ -2357,30 +2855,196 @@ async function importTimelineFromFile(file, mode) {
   return null;
 }
 
+async function loadCurrentPageData() {
+  if (page === 'published') {
+    await Promise.all([loadPublished(), loadCommunity()]);
+  } else if (page === 'published-detail') {
+    await loadPublishedDetail();
+  } else if (page === 'community') {
+    await loadCommunity();
+  } else if (page === 'community-profile') {
+    await loadCommunityProfile();
+  } else if (page === 'auth') {
+    await loadAuthOptions();
+  } else if (['personal', 'creator', 'archive', 'official'].includes(page)) {
+    if (!state.me?.authenticated) {
+      window.location.href = loginHref();
+      return false;
+    }
+    await loadWorkspace();
+  } else if (page === 'timeline') {
+    if (!state.me?.authenticated) {
+      window.location.href = loginHref();
+      return false;
+    }
+    await loadTimeline();
+  }
+  return true;
+}
+
+function canSmoothNavigate(url) {
+  if (url.origin !== window.location.origin) return false;
+  const nextPage = pageFromPath(url.pathname);
+  return ['personal', 'creator', 'archive', 'official', 'community', 'published'].includes(nextPage);
+}
+
+async function smoothNavigate(href, { replace = false } = {}) {
+  const url = new URL(href, window.location.origin);
+  if (!canSmoothNavigate(url) || state.routeSwitching) return false;
+  state.routeSwitching = true;
+  state.actionMenuOpen = false;
+  const currentNavTop = document.querySelector('[data-section-nav]')?.getBoundingClientRect().top;
+  const previousScrollHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+  const scrollFloor = Math.max(previousScrollHeight, window.scrollY + window.innerHeight + 24);
+  const nextPage = pageFromPath(url.pathname);
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+  const setRouteScrollFloor = () => {
+    root.style.minHeight = `${scrollFloor}px`;
+  };
+  const preserveNavPosition = () => {
+    const nav = document.querySelector('[data-section-nav]');
+    if (!nav || !Number.isFinite(currentNavTop)) return;
+    const nextTop = nav.getBoundingClientRect().top;
+    const delta = nextTop - currentNavTop;
+    if (Math.abs(delta) > 1) window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+  };
+  const settleNavPosition = () => {
+    preserveNavPosition();
+    positionSectionIndicator();
+  };
+  const updateRoute = async () => {
+    setRouteScrollFloor();
+    page = nextPage;
+    document.body.dataset.page = page;
+    if (replace) history.replaceState({}, '', nextUrl);
+    else history.pushState({}, '', nextUrl);
+    await loadCurrentPageData();
+    render();
+    setRouteScrollFloor();
+    preserveNavPosition();
+  };
+  try {
+    if (document.startViewTransition) {
+      await document.startViewTransition(updateRoute).finished;
+    } else {
+      root.classList.add('route-transitioning');
+      await updateRoute();
+      requestAnimationFrame(() => root.classList.remove('route-transitioning'));
+    }
+  } finally {
+    state.routeSwitching = false;
+    requestAnimationFrame(() => {
+      settleNavPosition();
+      requestAnimationFrame(() => {
+        settleNavPosition();
+        window.setTimeout(settleNavPosition, 90);
+        window.setTimeout(settleNavPosition, 260);
+      });
+    });
+  }
+  return true;
+}
+
+document.addEventListener('click', (event) => {
+  const link = event.target.closest('a.section-nav__link');
+  if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const href = link.getAttribute('href');
+  if (!href) return;
+  const url = new URL(href, window.location.origin);
+  if (!canSmoothNavigate(url)) return;
+  event.preventDefault();
+  smoothNavigate(href);
+});
+
+window.addEventListener('popstate', () => {
+  smoothNavigate(window.location.href, { replace: true });
+});
+
 function renderLanding() {
   const recent = readRecentAccounts();
   root.innerHTML = `
-    <div class="landing-wrap">
-      <section class="landing-card">
-        <div class="eyebrow">TimeGrid Calendar</div>
-        <h1>Private personal calendars, public share pages.</h1>
-        <p>Open TimeGrid first, then manage subscriptions, create timelines, and publish merged calendar pages. Mastodon stays linked for discussion and sharing.</p>
-        <div class="row">
-          <a class="button primary" href="${loginHref('/')}">Create account or sign in</a>
-          <a class="button" href="/published">Browse published calendars</a>
-        </div>
-        ${recent.length ? `<div class="banner">Recent accounts on this device: ${recent.map((item) => `@${escapeHtml(item.acct)}`).join(', ')}</div>` : ''}
-        <div class="landing-grid">
-          <div class="stat-block">
-            <h3>Main page for each user</h3>
-            <p class="muted">Personal page is restricted to the signed-in owner and Mastodon admins. Use the left sidebar to manage imported links or self-owned timeline feeds.</p>
+    <div class="landing-page">
+      <header class="site-header">
+        <a class="site-logo" href="/" aria-label="TimeGrid home"><span>TimeGrid</span><small>Calendar</small></a>
+        <nav class="site-nav" aria-label="Landing sections">
+          <a href="#goals">Goals</a>
+          <a href="#how-to-use">How to use</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+        <a class="button primary" href="${loginHref('/')}">Create account or sign in</a>
+      </header>
+      <main>
+        <section class="landing-hero">
+          <div class="landing-hero-copy">
+            <h1>Private personal calendars, public share pages.</h1>
+            <p>TimeGrid helps students, clubs, instructors, and small teams collect messy calendar feeds, clean them into timelines, and publish useful calendar pages without losing control of the original sources.</p>
+            <div class="row landing-hero-actions">
+              <a class="button primary" href="${loginHref('/')}">Create account or sign in</a>
+              <a class="button" href="/published">Browse published calendars</a>
+            </div>
+            ${recent.length ? `<div class="banner">Recent accounts on this device: ${recent.map((item) => `@${escapeHtml(item.acct)}`).join(', ')}</div>` : ''}
           </div>
-          <div class="stat-block">
-            <h3>Create your own timeline</h3>
-            <p class="muted">Open the timeline editor, drag or resize events, save, and the app generates a new ICS subscription link back into your personal calendar automatically.</p>
+          <div class="landing-preview" aria-label="Timeline editor preview">
+            <div class="preview-toolbar"><span></span><strong>Course timeline</strong><em>Live ICS</em></div>
+            <div class="preview-grid">
+              <div class="preview-side"><strong>Sources</strong><span>Personal</span><span>Creator</span><span>Published</span></div>
+              <div class="preview-calendar">
+                ${['Mon','Tue','Wed','Thu','Fri'].map((day) => `<small>${day}</small>`).join('')}
+                <b style="grid-column:2 / span 2">APS360 Lecture</b>
+                <i style="grid-column:3 / span 2">Office hours</i>
+                <b style="grid-column:1 / span 2">Project review</b>
+              </div>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+
+        <section class="landing-band" id="introduction">
+          <div class="section-kicker">Introduction</div>
+          <h2>One place to prepare calendars before people subscribe.</h2>
+          <p>Most calendar tools are built for personal editing after events already exist. TimeGrid focuses on the earlier step: importing schedules, fixing series, splitting breaks, skipping exceptions, and publishing a clean feed that other people can follow.</p>
+        </section>
+
+        <section class="landing-split" id="goals">
+          <div>
+            <div class="section-kicker">Goals</div>
+            <h2>Make shared time easier to trust.</h2>
+            <p>TimeGrid is designed around clarity, ownership, and repairable schedules. A creator should be able to explain where a calendar came from, adjust it safely, and publish it without forcing everyone else to manually copy events.</p>
+          </div>
+          <div class="goal-list">
+            <article><strong>Import without losing context</strong><span>Bring in ICS files and feeds, then keep source timelines understandable.</span></article>
+            <article><strong>Edit series carefully</strong><span>Manage recurring blocks, breaks, skipped dates, descriptions, links, and locations in one editor.</span></article>
+            <article><strong>Publish reusable pages</strong><span>Share public calendars people can preview, subscribe to, and attribute back to the creator.</span></article>
+          </div>
+        </section>
+
+        <section class="landing-steps" id="how-to-use">
+          <div class="section-kicker">How to use</div>
+          <h2>From rough schedule to subscribe-ready feed.</h2>
+          <div class="step-grid">
+            <article><span>1</span><strong>Sign in</strong><p>Create a TimeGrid account and open your personal calendar workspace.</p></article>
+            <article><span>2</span><strong>Import or create</strong><p>Add ICS files, feeds, or new events in the creator editor.</p></article>
+            <article><span>3</span><strong>Clean the timeline</strong><p>Fix single events, manage series breaks, and skip dates that should not appear.</p></article>
+            <article><span>4</span><strong>Publish and share</strong><p>Save the timeline, publish it, and share the page or subscription link.</p></article>
+          </div>
+        </section>
+
+        <section class="landing-split project-description">
+          <div>
+            <div class="section-kicker">Project description</div>
+            <h2>Built for academic and community schedules that change.</h2>
+          </div>
+          <p>Courses, labs, office hours, club events, and public programs often arrive as scattered files or unofficial links. TimeGrid treats calendars as maintained projects: creators can revise them, subscribers can follow the latest version, and published pages can explain what the calendar is for.</p>
+        </section>
+
+        <section class="landing-faq" id="faq">
+          <div class="section-kicker">FAQ</div>
+          <h2>Questions people usually ask first.</h2>
+          <details open><summary>Can I keep a calendar private?</summary><p>Yes. Personal pages are private to the signed-in owner and authorized admins. Publishing is a separate action.</p></details>
+          <details><summary>What happens when a source file has mistakes?</summary><p>Use the creator editor to correct single events, manage recurring series, add breaks, and skip individual occurrences before sharing the feed.</p></details>
+          <details><summary>Can other people subscribe?</summary><p>Published timelines expose calendar links that people can add to their own calendar apps.</p></details>
+          <details><summary>Why connect Mastodon?</summary><p>Mastodon provides identity and a path for public creator profiles, discussion, and attribution around published calendars.</p></details>
+        </section>
+      </main>
     </div>`;
 }
 
@@ -2523,7 +3187,6 @@ function renderPublished() {
           <div class="brand">
             <div class="eyebrow">TimeGrid Calendar</div>
             <h1>Published calendars</h1>
-            <p>Browse public, invited, or private merged calendars published by TimeGrid users.</p>
           </div>
           <div class="topbar-utility">
             ${state.me?.authenticated ? `<button data-action="logout">Sign out</button>${notificationsButton()}` : `<a class="button primary" href="${loginHref()}">Sign in with Mastodon</a>`}
@@ -2553,15 +3216,18 @@ function renderPublished() {
         <div class="public-list published-list-swap">
           ${items.length ? items.map(item => {
             const contributorText = (item.contributors || []).map((entry) => `${entry.name}${entry.count > 1 ? ` (${entry.count})` : ''}`).join(', ');
+            const visibilityLabel = labels[item.visibility] || 'Public';
+            const isOfficialOwner = String(item.owner_acct || '').toLowerCase() === 'official';
             return `
             <article class="public-card">
               <header>
                 <div>
-                  <div class="eyebrow"><a href="/people/${encodeURIComponent(item.owner_acct)}">@${escapeHtml(item.owner_acct)}</a></div>
-                  <strong>${escapeHtml(item.title)}</strong>
-                  <div class="muted">${escapeHtml(item.subscription_count)} subscriptions</div>
-                  <div class="muted">${escapeHtml(labels[item.visibility] || 'Public')}</div>
-                  ${contributorText ? `<div class="muted">Authors: ${escapeHtml(contributorText)}</div>` : ''}
+                  <div class="published-title-row">
+                    <strong>${escapeHtml(item.title)}</strong>
+                    ${isOfficialOwner ? '<span class="verified-badge" aria-label="Verified official">&#10003;</span>' : ''}
+                    <span class="published-pill">${escapeHtml(visibilityLabel)}</span>
+                    ${contributorText ? `<span class="published-pill">Authors: ${escapeHtml(contributorText)}</span>` : ''}
+                  </div>
                   ${item.hashtag_text ? `<div class="published-hashtags">${escapeHtml(item.hashtag_text)}</div>` : ''}
                 </div>
                 <div class="sub-actions">
@@ -2600,23 +3266,6 @@ function renderPublished() {
       ${notificationsModal()}
       ${eventDetailModal()}
     </div>`;
-  const officialRegistryMode = isOfficialRegistryMode();
-  if (officialRegistryMode) {
-    const grid = root.querySelector('.grid');
-    const main = root.querySelector('.main-panel');
-    if (grid && main) {
-      root.querySelector('.sidebar')?.remove();
-      grid.classList.add('official-registry-layout');
-      main.innerHTML = `
-        <div class="calendar-stage">
-          ${mastodonProvisioningBanner()}
-          ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
-          ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
-          ${officialRegistryTableMarkup()}
-        </div>`;
-    }
-  }
-
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   bindNoticeActions(renderPublished);
   bindEventDetailActions();
@@ -2668,7 +3317,6 @@ function renderCommunity() {
           <div class="brand">
             <div class="eyebrow">TimeGrid Community</div>
             <h1>People and their published calendars</h1>
-            <p>Discover creators, open their profile pages, and browse what they have published.</p>
           </div>
           <div class="topbar-utility">
             ${state.me?.authenticated ? `<button data-action="logout">Sign out</button>${notificationsButton()}` : `<a class="button primary" href="${loginHref()}">Sign in with Mastodon</a>`}
@@ -2701,23 +3349,6 @@ function renderCommunity() {
       </section>
       ${notificationsModal()}
     </div>`;
-  const officialRegistryMode = isOfficialRegistryMode();
-  if (officialRegistryMode) {
-    const grid = root.querySelector('.grid');
-    const main = root.querySelector('.main-panel');
-    if (grid && main) {
-      root.querySelector('.sidebar')?.remove();
-      grid.classList.add('official-registry-layout');
-      main.innerHTML = `
-        <div class="calendar-stage">
-          ${mastodonProvisioningBanner()}
-          ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
-          ${state.message ? `<div class="banner">${escapeHtml(state.message)}</div>` : ''}
-          ${officialRegistryTableMarkup()}
-        </div>`;
-    }
-  }
-
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   bindNoticeActions(renderCommunity);
   const searchInput = document.querySelector('[data-action="community-search-input"]');
@@ -2794,6 +3425,11 @@ document.addEventListener('keydown', (event) => {
     render();
     return;
   }
+  if (state.colorMenuOpenId) {
+    state.colorMenuOpenId = '';
+    renderPersonal();
+    return;
+  }
   if (state.noticesOpen) {
     state.noticesOpen = false;
     render();
@@ -2802,43 +3438,28 @@ document.addEventListener('keydown', (event) => {
 });
 
 function render() {
-  if (page === 'landing') return renderLanding();
-  if (page === 'auth') return renderAuthHub();
-  if (page === 'published') return renderPublished();
-  if (page === 'published-detail') return renderPublishedDetail();
-  if (page === 'published-embed') return renderPublishedEmbed();
-  if (page === 'community') return renderCommunity();
-  if (page === 'community-profile') return renderCommunityProfile();
-  if (page === 'personal') return renderPersonal();
-  if (page === 'creator') return renderPersonal();
-  if (page === 'archive') return renderPersonal();
-  if (page === 'timeline') return renderTimeline();
+  let rendered;
+  if (page === 'published') rendered = renderPublished();
+  else if (page === 'published-detail') rendered = renderPublishedDetail();
+  else if (page === 'auth') rendered = renderAuthHub();
+  else if (page === 'personal' || page === 'creator' || page === 'archive' || page === 'official') rendered = renderPersonal();
+  else if (page === 'timeline') rendered = renderTimeline();
+  else if (page === 'community') rendered = renderCommunity();
+  else if (page === 'community-profile') rendered = renderCommunityProfile();
+  else rendered = renderLanding();
+  requestAnimationFrame(() => {
+    positionSectionIndicator();
+    requestAnimationFrame(positionSectionIndicator);
+  });
+  window.setTimeout(positionSectionIndicator, 120);
+  return rendered;
 }
 
 async function boot() {
   try {
     await loadMe();
     await loadNotifications();
-    if (page === 'published') {
-      await loadPublished();
-      await loadCommunity();
-    } else if (page === 'published-detail') {
-      await loadPublishedDetail();
-    } else if (page === 'published-embed') {
-      await loadPublishedDetail();
-    } else if (page === 'community') {
-      await loadCommunity();
-    } else if (page === 'community-profile') {
-      await loadCommunityProfile();
-    } else if (page === 'auth') {
-      await loadAuthOptions();
-    } else if (page === 'personal' || page === 'creator' || page === 'archive') {
-      if (!state.me?.authenticated) return (window.location.href = loginHref());
-      await loadWorkspace();
-    } else if (page === 'timeline') {
-      if (!state.me?.authenticated) return (window.location.href = loginHref());
-      await loadTimeline();
-    }
+    await loadCurrentPageData();
     render();
   } catch (error) {
     state.error = error.message;

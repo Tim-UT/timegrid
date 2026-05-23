@@ -6180,11 +6180,7 @@ var TimeGridScheduleXCalendar = (() => {
     const viewLabelId = randomStringId();
     const [availableViews, setAvailableViews] = d3([]);
     useSignalEffect(() => {
-      if ($app.calendarState.isCalendarSmall.value) {
-        setAvailableViews($app.config.views.value.filter((view) => view.hasSmallScreenCompat));
-      } else {
-        setAvailableViews($app.config.views.value.filter((view) => view.hasWideScreenCompat));
-      }
+      setAvailableViews($app.config.views.value);
     });
     const getInitialSelectedViewLabel = () => {
       const selectedView = $app.config.views.value.find((view) => view.name === $app.calendarState.view.value);
@@ -7391,6 +7387,7 @@ var TimeGridScheduleXCalendar = (() => {
     $app.elements.calendarWrapper = document.getElementById(calendarId);
   };
   var setScreenSizeCompatibleView = ($app, isSmall) => {
+    return;
     const currentView = $app.config.views.value.find((view) => view.name === $app.calendarState.view.value);
     if (isSmall) {
       if (currentView.hasSmallScreenCompat)
@@ -11653,14 +11650,9 @@ var TimeGridScheduleXCalendar = (() => {
           if (target.closest('.sx__event')) return;
           close();
         };
-        const handleViewportChange = () => close();
         document.addEventListener("click", handleDocumentClick, true);
-        window.addEventListener("scroll", handleViewportChange, true);
-        window.addEventListener("resize", handleViewportChange, true);
         teardownGlobalListeners = () => {
           document.removeEventListener("click", handleDocumentClick, true);
-          window.removeEventListener("scroll", handleViewportChange, true);
-          window.removeEventListener("resize", handleViewportChange, true);
         };
       };
       if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
@@ -11771,6 +11763,7 @@ var TimeGridScheduleXCalendar = (() => {
       calendars,
       timezone,
       dayBoundaries: { start: "01:00", end: "01:00" },
+      weekOptions: config2.weekOptions,
       callbacks: {
         isCalendarSmall() {
           const width = host.clientWidth || mountPoint.clientWidth || 0;

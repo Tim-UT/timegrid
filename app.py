@@ -1858,6 +1858,9 @@ def merged_calendar_bytes(urls: list[str], title: str, desc: str, prodid: str) -
         'CALSCALE:GREGORIAN',
         f'X-WR-CALNAME:{escape_ics_text(title)}',
         f'X-WR-CALDESC:{escape_ics_text(desc)}',
+        'METHOD:PUBLISH',
+        'X-PUBLISHED-TTL:PT5M',
+        'REFRESH-INTERVAL;VALUE=DURATION:PT5M',
     ]
     for block in timezone_blocks + event_blocks:
         lines.extend(block)
@@ -2000,6 +2003,17 @@ def build_personal_export_snapshot(acct: str, user: dict[str, Any], store: dict[
 
 def export_token_url(token: str) -> str:
     return f'{APP_BASE_URL}/export/{token}.ics'
+
+
+def dynamic_calendar_headers(body: bytes) -> dict[str, str]:
+    stamp = datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    return {
+        'Cache-Control': 'no-store, no-cache, max-age=0, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Last-Modified': stamp,
+        'ETag': f'"{hashlib.sha256(body).hexdigest()}"',
+    }
 
 
 def ensure_export_record(store: dict[str, Any], acct: str, *, mode: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2893,7 +2907,7 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = build_personal_export_snapshot(acct, user, store)
                 body = snapshot['ics_bytes']
                 filename = f"{slugify(snapshot['metadata']['title']) or acct}-dynamic.ics"
-                cache_headers = {'Cache-Control': 'no-store'}
+                cache_headers = dynamic_calendar_headers(body)
             else:
                 body = str(record.get('ics_text') or '').encode('utf-8')
                 title = str(record.get('title') or acct)
@@ -3267,6 +3281,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[2] == 'creator':
                 self.send_bytes(200, page_shell(f'{acct} creator page', 'creator', 'personal-page creator-page', calendar_head()))
                 return
+            if len(parts) == 3 and parts[2] == 'official':
+                self.send_bytes(200, page_shell(f'{acct} official page', 'official', 'personal-page creator-page official-page', calendar_head()))
+                return
             if len(parts) == 3 and parts[2] == 'archive':
                 self.send_bytes(200, page_shell(f'{acct} archive page', 'archive', 'personal-page archive-page', calendar_head()))
                 return
@@ -3494,7 +3511,7 @@ class Handler(BaseHTTPRequestHandler):
                     filename = f'{acct}-timegrid-export.ics'
                     self.send_bytes(200, snapshot['ics_bytes'], 'text/calendar; charset=utf-8', headers={
                         'Content-Disposition': f'attachment; filename="{filename}"',
-                        'Cache-Control': 'no-store',
+                        **dynamic_calendar_headers(snapshot['ics_bytes']),
                     })
                     return
                 if ext == 'csv':
@@ -3560,6 +3577,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/api/auth/email/login':
             self.send_json(403, {'error': 'email_auth_disabled'})
+            return
+
+        if path == '/api/notifications':
+            session = self.require_session()
+            if session is None:
+                return
+            store = load_store()
+            user = ensure_user(store, session['acct'])
+            body = self.parse_json_body()
+            title = str(body.get('title') or '').strip()[:160]
+            notice_body = str(body.get('body') or '').strip()[:600]
+            href = str(body.get('href') or '').strip()[:240]
+            if not title:
+                self.send_json(400, {'error': 'title_required'})
+                return
+            add_notification(
+                user,
+                kind='workspace_notice',
+                title=title,
+                body=notice_body,
+                actor_acct=session['acct'],
+                href=href,
+            )
+            user['updated_at'] = now_iso()
+            save_store(store)
+            item = serialize_notification(user.get('notifications', [])[0])
+            self.send_json(200, {'ok': True, 'item': item, 'unread': unread_notification_count(user)})
             return
 
         if path == '/api/notifications/read':
