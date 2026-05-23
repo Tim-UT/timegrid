@@ -32,28 +32,13 @@ Localhost entries are only for development.
 
 ## Providers
 
-Enable these Supabase Auth providers:
+This phase uses:
 
 - Email/password
-- Google
-- Apple
+- Mastodon OAuth
 
-As of the latest production check on May 23, 2026, Supabase reports Email as
-enabled and Google/Apple as disabled in `/auth/v1/settings`. TimeGrid hides
-clickable Google/Apple buttons until Supabase reports those providers enabled.
-
-For Google and Apple, configure the provider in its own developer console, then
-copy the Supabase callback URL shown in the provider setup page into Google or
-Apple. TimeGrid starts the flow at:
-
-```text
-/auth/provider/google/login
-/auth/provider/apple/login
-```
-
-Supabase redirects back to `/auth` with the Auth token fragment. The browser
-then calls `/api/auth/supabase/session`, and the backend creates a `tg_session`
-cookie.
+Google and Apple buttons are intentionally hidden for now. They can be restored
+later after provider credentials are configured in Supabase Auth.
 
 ## Test Emails
 
@@ -62,8 +47,6 @@ Use these for development flow checks:
 ```text
 sample1@time-grid.org
 creator.sample@time-grid.org
-apple.flow@time-grid.org
-google.flow@time-grid.org
 ```
 
 Use at least 8 characters for passwords. If email confirmations are enabled,

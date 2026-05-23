@@ -357,26 +357,6 @@ def configured_auth_providers() -> list[dict[str, Any]]:
                 'provisions_mastodon': False,
                 'native_email_auth': True,
             })
-        google_enabled = supabase_provider_enabled('google')
-        apple_enabled = supabase_provider_enabled('apple')
-        providers.extend([
-            {
-                'id': 'google',
-                'label': 'Google',
-                'description': 'Continue with your Google account through Supabase Auth.' if google_enabled else 'Google sign-in is wired in TimeGrid but not enabled in Supabase yet.',
-                'status': 'active' if google_enabled else 'setup_required',
-                'provisions_mastodon': False,
-                'supabase_provider': True,
-            },
-            {
-                'id': 'apple',
-                'label': 'Apple',
-                'description': 'Continue with your Apple account through Supabase Auth.' if apple_enabled else 'Apple sign-in is wired in TimeGrid but not enabled in Supabase yet.',
-                'status': 'active' if apple_enabled else 'setup_required',
-                'provisions_mastodon': False,
-                'supabase_provider': True,
-            },
-        ])
     for provider_id in ('google', 'apple', 'uoft'):
         if supabase_auth_enabled() and provider_id in {'google', 'apple'}:
             continue
