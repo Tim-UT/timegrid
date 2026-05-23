@@ -220,6 +220,11 @@ def main() -> int:
             assert moved_workspace['active_calendar_id'] == overflow_calendar['id']
             assert any(item['id'] == timeline['id'] for item in moved_workspace['timelines']), 'timeline should move with dragged subscription'
 
+            detached = client.json('DELETE', f'/api/personal/sample1/subscriptions/{urllib.parse.quote(subscription["id"])}')
+            assert detached['mode'] == 'detach'
+            detached_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(overflow_calendar["id"])}')
+            assert all(item['id'] != timeline['id'] for item in detached_workspace['timelines']), 'detached timeline should disappear from workspace'
+
             print(json.dumps({
                 'ok': True,
                 'calendar_id': calendar_id,

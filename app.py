@@ -3634,7 +3634,7 @@ class Handler(BaseHTTPRequestHandler):
                 user['subscriptions'].insert(0, item)
                 sync_group_parent_component(user, item)
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, session['acct'], calendars=True, subscriptions=True)
                 status = 'added'
             else:
                 existing['title'] = bundle.get('title') or slug
@@ -3646,7 +3646,7 @@ class Handler(BaseHTTPRequestHandler):
                 existing['visible'] = True
                 existing['trashed'] = False
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, session['acct'], calendars=True, subscriptions=True)
                 status = 'existing'
             self.redirect(f'/u/{urllib.parse.quote(session["acct"])}?subscribed={status}&title={urllib.parse.quote(bundle.get("title") or slug)}')
             return
@@ -4899,13 +4899,15 @@ class Handler(BaseHTTPRequestHandler):
                 detached = False
                 if mode == 'permanent':
                     purge_subscription(store, user, acct, item)
+                    user['updated_at'] = now_iso()
+                    save_store(store)
                 else:
                     item['detached'] = True
                     item['visible'] = False
                     item['trashed'] = False
                     detached = True
-                user['updated_at'] = now_iso()
-                save_store(store)
+                    user['updated_at'] = now_iso()
+                    save_user_fragment(store, acct, subscriptions=True, timelines=True)
                 self.send_json(200, {'ok': True, 'mode': 'detach' if detached else mode, 'references': refs})
                 return
         self.send_json(404, {'error': 'not_found'})
