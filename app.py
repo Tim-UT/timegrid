@@ -134,10 +134,29 @@ def save_store(data: dict[str, Any]) -> None:
         CALENDAR_TEXT_CACHE.clear()
 
 
-def save_user_fragment(data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False, exports: bool = False) -> None:
+def save_user_fragment(
+    data: dict[str, Any],
+    acct: str,
+    *,
+    identities: bool = False,
+    calendars: bool = False,
+    subscriptions: bool = False,
+    timelines: bool = False,
+    exports: bool = False,
+    notifications: bool = False,
+) -> None:
     global STORE_CACHE
     if STORAGE is not None:
-        STORAGE.save_user_fragment(data, acct, calendars=calendars, subscriptions=subscriptions, timelines=timelines, exports=exports)
+        STORAGE.save_user_fragment(
+            data,
+            acct,
+            identities=identities,
+            calendars=calendars,
+            subscriptions=subscriptions,
+            timelines=timelines,
+            exports=exports,
+            notifications=notifications,
+        )
         with STORE_CACHE_LOCK:
             STORE_CACHE = copy.deepcopy(data)
         with CALENDAR_TEXT_CACHE_LOCK:
@@ -664,7 +683,7 @@ def create_test_login_session(acct: str, display_name: str = '', *, role: str = 
     user = ensure_user(store, acct)
     user['display_name'] = display_name
     user['updated_at'] = now_iso()
-    save_store(store)
+    save_user_fragment(store, acct, calendars=True)
     session_id = new_id('sess')
     session = {
         'acct': acct,
@@ -841,7 +860,7 @@ def create_session_from_supabase_access_token(access_token: str, provider: str =
     store = load_store()
     user = resolve_or_create_supabase_user(store, auth_user, provider=provider)
     user['updated_at'] = now_iso()
-    save_store(store)
+    save_user_fragment(store, user['acct'], identities=True, calendars=True)
     session_id, session = create_session_for_user(user, provider=provider or 'supabase')
     session['access_token'] = access_token
     save_auth_state()
@@ -3213,7 +3232,7 @@ class Handler(BaseHTTPRequestHandler):
             avatar=avatar,
             email_verified=email_verified,
         )
-        save_store(store)
+        save_user_fragment(store, user['acct'], identities=True, calendars=True)
         session_id, _session = create_session_for_user(user, provider=provider_id)
         next_path = auth_ctx.get('next') or f'/u/{user["acct"]}'
         next_path = safe_post_auth_path(next_path, user['acct'])
@@ -3465,7 +3484,7 @@ class Handler(BaseHTTPRequestHandler):
                     'created_at': now_iso(),
                 })
             user['updated_at'] = now_iso()
-            save_store(store)
+            save_user_fragment(store, acct, identities=True, calendars=True)
             session_id, session_data = create_session_for_user(user, provider='mastodon', role=role)
             session_data['access_token'] = token
             session_data['account_id'] = str(account.get('id'))
@@ -4162,7 +4181,7 @@ class Handler(BaseHTTPRequestHandler):
                 href=href,
             )
             user['updated_at'] = now_iso()
-            save_store(store)
+            save_user_fragment(store, session['acct'], notifications=True)
             item = serialize_notification(user.get('notifications', [])[0])
             self.send_json(200, {'ok': True, 'item': item, 'unread': unread_notification_count(user)})
             return
@@ -4186,7 +4205,7 @@ class Handler(BaseHTTPRequestHandler):
                     break
             if changed:
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, session['acct'], notifications=True)
             self.send_json(200, {'ok': True, 'unread': unread_notification_count(user)})
             return
 
@@ -4258,7 +4277,7 @@ class Handler(BaseHTTPRequestHandler):
                 existing['visible'] = True
                 existing['trashed'] = False
             user['updated_at'] = now_iso()
-            save_store(store)
+            save_user_fragment(store, acct, calendars=True, subscriptions=True)
             self.send_json(200, {'ok': True, 'subscribed': True})
             return
 

@@ -61,16 +61,49 @@ def main() -> int:
 
     fragment_storage = FakeStorage()
     store = build_store(users=2, timelines_per_user=4, events_per_timeline=2)
-    fragment_storage.save_user_fragment(store, 'sample1', subscriptions=True, timelines=True, exports=True)
+    store['users']['sample1']['notifications'] = [{
+        'id': 'note_sample1',
+        'kind': 'workspace_notice',
+        'title': 'Sample notice',
+        'body': '',
+        'href': '',
+        'actor_acct': 'sample1',
+        'created_at': store['users']['sample1']['updated_at'],
+    }]
+    store['users']['sample2']['notifications'] = [{
+        'id': 'note_sample2',
+        'kind': 'workspace_notice',
+        'title': 'Other notice',
+        'body': '',
+        'href': '',
+        'actor_acct': 'sample2',
+        'created_at': store['users']['sample2']['updated_at'],
+    }]
+    fragment_storage.save_user_fragment(
+        store,
+        'sample1',
+        identities=True,
+        calendars=True,
+        subscriptions=True,
+        timelines=True,
+        exports=True,
+        notifications=True,
+    )
     upserts = fragment_storage.writer.upserts
     user_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_users')
+    identity_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_auth_identities')
+    calendar_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_calendars')
     subscription_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_subscriptions')
     timeline_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_timelines')
     export_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_exports')
+    notification_rows = next(rows for table, rows, _conflict in upserts if table == 'timegrid_notifications')
     assert {row['acct'] for row in user_rows} == {'sample1'}
+    assert {row['acct'] for row in identity_rows} == {'sample1'}
+    assert {row['owner_acct'] for row in calendar_rows} == {'sample1'}
     assert {row['owner_acct'] for row in subscription_rows} == {'sample1'}
     assert {row['owner_acct'] for row in timeline_rows} == {'sample1'}
     assert {row['acct'] for row in export_rows} == {'sample1'}
+    assert {row['acct'] for row in notification_rows} == {'sample1'}
     assert all(not str(value).startswith(('tl_u2_', 'sub_u2_')) for _table, _column, value, _payload in fragment_storage.writer.patches)
 
     print({'ok': True, 'deleted': storage.deleted, 'fragment_upserts': len(upserts), 'fragment_patches': len(fragment_storage.writer.patches)})

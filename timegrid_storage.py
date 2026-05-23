@@ -317,7 +317,18 @@ class SupabaseStorage:
         rows = transform(data)
         import_rows(self.writer, rows)
 
-    def save_user_fragment(self, data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False, exports: bool = False) -> None:
+    def save_user_fragment(
+        self,
+        data: dict[str, Any],
+        acct: str,
+        *,
+        identities: bool = False,
+        calendars: bool = False,
+        subscriptions: bool = False,
+        timelines: bool = False,
+        exports: bool = False,
+        notifications: bool = False,
+    ) -> None:
         acct = str(acct or '').strip().lower()
         if not acct:
             self.save_store(data)
@@ -325,6 +336,12 @@ class SupabaseStorage:
         rows = transform(data)
         user_rows = [row for row in rows['users'] if row.get('acct') == acct]
         self.writer.upsert('timegrid_users', user_rows, on_conflict='acct')
+        if identities:
+            self.writer.upsert(
+                'timegrid_auth_identities',
+                [row for row in rows['identities'] if row.get('acct') == acct],
+                on_conflict='id',
+            )
         if calendars:
             self.writer.upsert(
                 'timegrid_calendars',
@@ -351,6 +368,12 @@ class SupabaseStorage:
                 'timegrid_exports',
                 [row for row in rows['exports'] if row.get('acct') == acct],
                 on_conflict='token',
+            )
+        if notifications:
+            self.writer.upsert(
+                'timegrid_notifications',
+                [row for row in rows['notifications'] if row.get('acct') == acct],
+                on_conflict='id',
             )
 
     def reconcile_store(self, data: dict[str, Any]) -> None:
