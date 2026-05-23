@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import calendar as pycalendar
+import copy
 import csv
 import hashlib
 import html
@@ -12,6 +13,7 @@ import os
 import random
 import secrets
 import tempfile
+import threading
 import time
 import urllib.parse
 from datetime import date, datetime, timedelta, timezone
@@ -55,6 +57,11 @@ sessions: dict[str, dict[str, Any]] = {}
 OIDC_DISCOVERY_CACHE: dict[str, dict[str, Any]] = {}
 SUPABASE_AUTH_SETTINGS_CACHE: dict[str, Any] = {'loaded_at': 0.0, 'settings': {}}
 STORAGE = SupabaseStorage() if use_supabase_storage() else None
+STORE_CACHE: dict[str, Any] | None = None
+STORE_CACHE_LOCK = threading.RLock()
+CALENDAR_TEXT_CACHE: dict[str, tuple[float, str]] = {}
+CALENDAR_TEXT_CACHE_LOCK = threading.RLock()
+CALENDAR_TEXT_CACHE_TTL = int(os.environ.get('TIMEGRID_CALENDAR_TEXT_CACHE_TTL', '600'))
 
 APP_JS = STATIC_DIR / 'app.js'
 SCHEDULE_X_FRAME_JS = STATIC_DIR / 'schedule-x-frame.js'
@@ -82,15 +89,19 @@ def ensure_store() -> None:
 
 
 def load_store() -> dict[str, Any]:
+    global STORE_CACHE
     if STORAGE is not None:
-        data = STORAGE.load_store()
-        data.setdefault('users', {})
-        data.setdefault('published', {})
-        data.setdefault('signup_intents', [])
-        data.setdefault('exports', {})
-        if ensure_official_content(data):
-            save_store(data)
-        return data
+        with STORE_CACHE_LOCK:
+            if STORE_CACHE is None:
+                data = STORAGE.load_store()
+                data.setdefault('users', {})
+                data.setdefault('published', {})
+                data.setdefault('signup_intents', [])
+                data.setdefault('exports', {})
+                if ensure_official_content(data):
+                    STORAGE.save_store(data)
+                STORE_CACHE = copy.deepcopy(data)
+            return copy.deepcopy(STORE_CACHE)
     ensure_store()
     with DATA_FILE.open('r', encoding='utf-8') as fh:
         data = json.load(fh)
@@ -104,8 +115,13 @@ def load_store() -> dict[str, Any]:
 
 
 def save_store(data: dict[str, Any]) -> None:
+    global STORE_CACHE
     if STORAGE is not None:
         STORAGE.save_store(data)
+        with STORE_CACHE_LOCK:
+            STORE_CACHE = copy.deepcopy(data)
+        with CALENDAR_TEXT_CACHE_LOCK:
+            CALENDAR_TEXT_CACHE.clear()
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False, dir=DATA_DIR) as tmp:
@@ -114,6 +130,8 @@ def save_store(data: dict[str, Any]) -> None:
         os.fsync(tmp.fileno())
         temp_name = tmp.name
     os.replace(temp_name, DATA_FILE)
+    with CALENDAR_TEXT_CACHE_LOCK:
+        CALENDAR_TEXT_CACHE.clear()
 
 
 def write_json_file(path: Path, payload: dict[str, Any]) -> None:
@@ -2137,18 +2155,85 @@ def extract_calendar_blocks(raw_text: str) -> tuple[list[list[str]], list[list[s
     return timezones, events
 
 
-def merged_calendar_bytes(urls: list[str], title: str, desc: str, prodid: str) -> bytes:
+def local_calendar_bytes(url: str, store: dict[str, Any], session: dict[str, Any] | None = None) -> bytes | None:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return None
+    app_host = urllib.parse.urlparse(APP_BASE_URL).netloc
+    if parsed.netloc and parsed.netloc != app_host:
+        return None
+    path = parsed.path or ''
+    if path.startswith('/ics/') and path.endswith('.ics'):
+        rest = path[len('/ics/'): -4]
+        if '/' not in rest:
+            return None
+        acct, timeline_id = rest.split('/', 1)
+        user = ensure_user(store, urllib.parse.unquote(acct))
+        timeline = find_timeline(user, urllib.parse.unquote(timeline_id))
+        return timeline_to_ics(user['acct'], timeline) if timeline else None
+    if path.startswith('/bundle/private/') and path.endswith('.ics'):
+        parts = [part for part in path.split('/') if part]
+        if len(parts) != 4:
+            return None
+        acct = urllib.parse.unquote(parts[2])
+        sub_id = urllib.parse.unquote(parts[3][:-4])
+        user = ensure_user(store, acct)
+        item = find_subscription(user, sub_id)
+        if not item or item.get('kind') != 'bundle':
+            return None
+        urls = resolve_subscription_urls(user, item, store=store)
+        return merged_calendar_bytes(urls, item.get('title') or sub_id, f"Merged private timeline from {acct}", '-//TimeGrid//Merged Timeline//EN', store=store, session=session)
+    if path.startswith('/bundle/') and path.endswith('.ics'):
+        slug = urllib.parse.unquote(path[len('/bundle/'): -4])
+        bundle = store.get('published', {}).get(slug)
+        if not bundle or not bundle_discoverable(bundle):
+            return None
+        if session is not None and not bundle_visible_to_session(bundle, session):
+            return None
+        urls = bundle_urls(store, bundle, session)
+        return merged_calendar_bytes(urls, bundle.get('title') or slug, f"Published bundle from {APP_BASE_URL}/p/{slug}", '-//TimeGrid//Published Bundle//EN', store=store, session=session)
+    return None
+
+
+def calendar_text_for_url(url: str, store: dict[str, Any] | None = None, session: dict[str, Any] | None = None) -> str | None:
+    cache_key = str(url or '')
+    now_ts = time.time()
+    if cache_key:
+        with CALENDAR_TEXT_CACHE_LOCK:
+            cached = CALENDAR_TEXT_CACHE.get(cache_key)
+            if cached and cached[0] > now_ts:
+                return cached[1]
+    if store is not None:
+        local = local_calendar_bytes(url, store, session)
+        if local is not None:
+            text = local.decode('utf-8', errors='replace')
+            if cache_key:
+                with CALENDAR_TEXT_CACHE_LOCK:
+                    CALENDAR_TEXT_CACHE[cache_key] = (now_ts + CALENDAR_TEXT_CACHE_TTL, text)
+            return text
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        text = resp.text
+        if cache_key:
+            with CALENDAR_TEXT_CACHE_LOCK:
+                CALENDAR_TEXT_CACHE[cache_key] = (now_ts + CALENDAR_TEXT_CACHE_TTL, text)
+        return text
+    except Exception:
+        return None
+
+
+def merged_calendar_bytes(urls: list[str], title: str, desc: str, prodid: str, *, store: dict[str, Any] | None = None, session: dict[str, Any] | None = None) -> bytes:
     timezone_blocks: list[list[str]] = []
     event_blocks: list[list[str]] = []
     seen_timezones: set[str] = set()
     seen_events: set[str] = set()
     for url in urls:
-        try:
-            resp = requests.get(url, timeout=20)
-            resp.raise_for_status()
-        except Exception:
+        text = calendar_text_for_url(url, store, session)
+        if text is None:
             continue
-        tz_blocks, ev_blocks = extract_calendar_blocks(resp.text)
+        tz_blocks, ev_blocks = extract_calendar_blocks(text)
         for block in tz_blocks:
             key = '\n'.join(block).strip()
             if key and key not in seen_timezones:
@@ -2303,7 +2388,7 @@ def build_personal_export_snapshot(acct: str, user: dict[str, Any], store: dict[
     urls = [item.get('url') or '' for item in sources if item.get('url')]
     title = metadata['title']
     desc = f"Visible personal TimeGrid calendar for @{acct} from {APP_BASE_URL}. Authors: {', '.join(metadata['authors']) or metadata['owner_name']}"
-    ics_bytes = merged_calendar_bytes(urls, title, desc, '-//TimeGrid//Personal Export//EN')
+    ics_bytes = merged_calendar_bytes(urls, title, desc, '-//TimeGrid//Personal Export//EN', store=store)
     return {
         'sources': sources,
         'urls': urls,
@@ -2712,7 +2797,7 @@ def calendar_head() -> str:
 '''
 
 
-def page_shell(title: str, page: str, body_class: str = '', extra_head: str = '', body_attrs: str = '') -> bytes:
+def page_shell(title: str, page: str, body_class: str = '', extra_head: str = '', body_attrs: str = '', app_html: str = '') -> bytes:
     title_esc = html.escape(title)
     body_attrs = f' {body_attrs.strip()}' if body_attrs.strip() else ''
     return f'''<!doctype html>
@@ -2729,10 +2814,42 @@ def page_shell(title: str, page: str, body_class: str = '', extra_head: str = ''
   {extra_head}
 </head>
 <body class="{body_class}" data-page="{page}"{body_attrs}>
-  <div id="app"></div>
+  <div id="app">{app_html}</div>
   <script src="{asset_href("/app.js", APP_JS)}" defer></script>
 </body>
 </html>'''.encode('utf-8')
+
+
+def auth_initial_html(next_path: str) -> str:
+    next_href = html.escape(next_path or '/', quote=True)
+    mastodon_href = html.escape(f'/auth/login?next={urllib.parse.quote(next_path or "/")}', quote=True)
+    return f'''
+    <div class="auth-shell">
+      <section class="auth-centered-card">
+        <div class="auth-mark">TimeGrid</div>
+        <h1>Create your TimeGrid account</h1>
+        <p class="auth-subcopy">Use one account for calendars, creator pages, publishing, invites, and dynamic exports.</p>
+        <div class="auth-mode-switch" role="tablist" aria-label="Auth mode">
+          <button type="button" class="active">Sign up</button>
+          <button type="button">Sign in</button>
+        </div>
+        <div class="auth-secondary-list">
+          <a class="button auth-provider-button" href="{mastodon_href}">Continue with Mastodon</a>
+        </div>
+        <form class="auth-email-form" onsubmit="return false">
+          <label>Display name<input name="display_name" autocomplete="name" placeholder="Ada Lovelace" /></label>
+          <label>Email<input name="email" type="email" autocomplete="email" placeholder="sample1@time-grid.org" required /></label>
+          <label>Password<input name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required /></label>
+          <button class="button primary auth-provider-button" type="submit">Create account with email</button>
+        </form>
+        <div class="auth-help">Test with <code>sample1@time-grid.org</code>, <code>creator.sample@time-grid.org</code>, or your own email.</div>
+        <div class="auth-link-row">
+          <a href="/published">Browse published calendars</a>
+          <span>·</span>
+          <a href="{next_href}">Back to TimeGrid</a>
+        </div>
+      </section>
+    </div>'''
 
 
 def timeline_page(title: str) -> bytes:
@@ -3378,6 +3495,7 @@ class Handler(BaseHTTPRequestHandler):
                     'auth',
                     'auth-page',
                     body_attrs=f'data-auth-next="{html.escape(next_path, quote=True)}"',
+                    app_html=auth_initial_html(next_path),
                 ),
             )
             return
@@ -3535,7 +3653,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             urls = resolve_subscription_urls(user, item)
             title = item.get('title') or sub_id
-            data = merged_calendar_bytes(urls, title, f"Merged private timeline from {acct}", '-//TimeGrid//Merged Timeline//EN')
+            data = merged_calendar_bytes(urls, title, f"Merged private timeline from {acct}", '-//TimeGrid//Merged Timeline//EN', store=store, session=self.current_session())
             headers = {'Content-Disposition': f'inline; filename="{slugify(title) or sub_id}.ics"'}
             self.send_bytes(200, data, headers={'Content-Type': 'text/calendar; charset=utf-8', **headers})
             return
@@ -3556,7 +3674,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(403, {'error': 'forbidden'})
                 return
             urls = bundle_urls(store, bundle, session)
-            data = merged_calendar_bytes(urls, bundle.get('title') or slug, f"Published bundle from {APP_BASE_URL}/p/{slug}", '-//TimeGrid//Published Bundle//EN')
+            data = merged_calendar_bytes(urls, bundle.get('title') or slug, f"Published bundle from {APP_BASE_URL}/p/{slug}", '-//TimeGrid//Published Bundle//EN', store=store, session=session)
             headers = {'Content-Disposition': f'inline; filename="{slugify(bundle.get("title") or slug)}.ics"'}
             self.send_bytes(200, data, 'text/calendar; charset=utf-8', headers)
             return
@@ -3830,6 +3948,10 @@ class Handler(BaseHTTPRequestHandler):
                 item = find_subscription(user, parts[4])
                 if not item or not item.get('url'):
                     self.send_json(404, {'error': 'not_found'})
+                    return
+                local = local_calendar_bytes(item['url'], store, session)
+                if local is not None:
+                    self.send_bytes(200, local, 'text/calendar; charset=utf-8')
                     return
                 try:
                     resp = requests.get(item['url'], timeout=20)
@@ -4780,6 +4902,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     ensure_store()
     load_auth_state()
+    if STORAGE is not None:
+        load_store()
     server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     print(f'Listening on http://127.0.0.1:{PORT}')
     server.serve_forever()
