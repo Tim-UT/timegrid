@@ -68,6 +68,7 @@ const state = {
   calendar: null,
   readonlyCalendar: null,
   readonlyLoadToken: 0,
+  readonlyRendererLoadPromise: null,
   timelineView: '',
   timelineDate: null,
   timelineHint: '',
@@ -3024,6 +3025,47 @@ function readonlyEventDescription(item) {
   return parts.join('\n\n').trim();
 }
 
+function scriptSrcFor(path) {
+  const script = Array.from(document.scripts || []).find((item) => {
+    try {
+      return new URL(item.src, window.location.origin).pathname === path;
+    } catch (_error) {
+      return false;
+    }
+  });
+  return script?.src || path;
+}
+
+function ensureReadonlyRenderer() {
+  if (window.TimeGridScheduleXCalendar?.mountReadonly) return Promise.resolve(true);
+  if (state.readonlyRendererLoadPromise) return state.readonlyRendererLoadPromise;
+  state.readonlyRendererLoadPromise = new Promise((resolve) => {
+    const src = scriptSrcFor('/schedule-x-readonly.js');
+    const existing = Array.from(document.scripts || []).find((item) => {
+      try {
+        return new URL(item.src, window.location.origin).pathname === '/schedule-x-readonly.js';
+      } catch (_error) {
+        return false;
+      }
+    });
+    const finish = () => resolve(Boolean(window.TimeGridScheduleXCalendar?.mountReadonly));
+    if (existing && !existing.dataset.timegridReloaded) {
+      existing.addEventListener('load', finish, { once: true });
+      existing.addEventListener('error', () => resolve(false), { once: true });
+      window.setTimeout(finish, 250);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src.includes('?') ? `${src}&retry=${Date.now()}` : `${src}?retry=${Date.now()}`;
+    script.async = false;
+    script.dataset.timegridReloaded = 'true';
+    script.onload = finish;
+    script.onerror = () => resolve(false);
+    document.head.appendChild(script);
+  });
+  return state.readonlyRendererLoadPromise;
+}
+
 async function initReadonlyCalendar(elementId, sources, hintId = '') {
   const el = document.getElementById(elementId);
   if (!el) return;
@@ -3050,7 +3092,9 @@ async function initReadonlyCalendar(elementId, sources, hintId = '') {
   const viewScope = `${elementId}:${page}:${currentAcct() || currentPublishedSlug?.() || ''}`;
   const focus = calendarFocus(expanded, { initialView: savedCalendarView(viewScope) || 'dayGridMonth' });
   el.innerHTML = '';
-  if (window.TimeGridScheduleXCalendar?.mountReadonly) {
+  const rendererReady = await ensureReadonlyRenderer();
+  if (token !== state.readonlyLoadToken) return;
+  if (rendererReady && window.TimeGridScheduleXCalendar?.mountReadonly) {
     setCalendarHint(hintId, focus.hint);
     const mounted = window.TimeGridScheduleXCalendar.mountReadonly(el, {
       events: expanded.map((item) => ({
