@@ -4360,7 +4360,7 @@ class Handler(BaseHTTPRequestHandler):
                     item['grouped_in'] = grouped_in
                 user['subscriptions'].insert(0, item)
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True)
                 self.send_json(201, serialize_subscription(acct, item, user))
                 return
 
@@ -4390,7 +4390,7 @@ class Handler(BaseHTTPRequestHandler):
                     sub['workspace'] = workspace
                 user['timelines'].insert(0, timeline)
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True, timelines=True)
                 self.send_json(201, {'timeline': serialize_timeline(acct, timeline), 'subscription': serialize_subscription(acct, find_subscription(user, timeline['subscription_id']), user)})
                 return
 
@@ -4781,7 +4781,7 @@ class Handler(BaseHTTPRequestHandler):
                     timeline['overlay_timeline_id'] = overlay_timeline['id']
                     timeline['updated_at'] = now_iso()
                     user['updated_at'] = now_iso()
-                    save_store(store)
+                    save_user_fragment(store, acct, subscriptions=True, timelines=True)
                     payload = build_wrapper_timeline(acct, user, timeline)
                     self.send_json(200, {'timeline': payload, 'subscription': serialize_subscription(acct, target, user)})
                     return
@@ -4808,7 +4808,7 @@ class Handler(BaseHTTPRequestHandler):
                 if sub and timeline.get('calendar_id'):
                     move_subscription_to_calendar(user, sub, timeline.get('calendar_id'), timeline.get('workspace') or 'personal')
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True, timelines=True)
                 sub = find_subscription(user, timeline['subscription_id'])
                 self.send_json(200, {'timeline': serialize_timeline(acct, timeline), 'subscription': serialize_subscription(acct, sub, user) if sub else None})
                 return

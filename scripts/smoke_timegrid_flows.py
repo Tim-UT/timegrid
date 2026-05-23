@@ -104,6 +104,10 @@ def main() -> int:
                 'title': 'Overflow',
                 'workspace': 'personal',
             })['calendar']
+            creator_calendar = client.json('POST', '/api/personal/sample1/calendars', {
+                'title': 'Creator releases',
+                'workspace': 'creator',
+            })['calendar']
             moved_calendar = client.json('PATCH', f'/api/personal/sample1/calendars/{urllib.parse.quote(overflow_calendar["id"])}', {
                 'position': 0,
             })['calendar']
@@ -136,6 +140,31 @@ def main() -> int:
             selected_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(calendar_id)}')
             assert selected_workspace['active_calendar_id'] == calendar_id
             assert len(selected_workspace['timelines']) == 1
+
+            creator_imported = client.json('POST', '/api/personal/sample1/timelines', {
+                'title': 'Creator launch plan',
+                'description': 'Creator calendar smoke test',
+                'calendar_id': creator_calendar['id'],
+                'workspace': 'creator',
+                'events': [
+                    {
+                        'id': 'evt_creator_launch',
+                        'title': 'Creator launch',
+                        'start': '2026-07-01T14:00:00Z',
+                        'end': '2026-07-01T15:00:00Z',
+                        'description': '',
+                        'location': 'Studio',
+                        'url': '',
+                        'recurrence': None,
+                        'exdates': [],
+                        'overrides': [],
+                    }
+                ],
+            })
+            assert creator_imported['timeline']['calendar_id'] == creator_calendar['id']
+            creator_workspace = client.json('GET', f'/api/creator/sample1?calendar_id={urllib.parse.quote(creator_calendar["id"])}')
+            assert creator_workspace['active_calendar_id'] == creator_calendar['id']
+            assert any(item['id'] == creator_imported['timeline']['id'] for item in creator_workspace['timelines']), 'creator calendar should contain its new timeline'
 
             dynamic = client.json('POST', '/api/personal/sample1/exports', {
                 'mode': 'dynamic',
@@ -194,6 +223,7 @@ def main() -> int:
             print(json.dumps({
                 'ok': True,
                 'calendar_id': calendar_id,
+                'creator_calendar_id': creator_calendar['id'],
                 'moved_calendar_id': overflow_calendar['id'],
                 'timeline_id': timeline['id'],
                 'dynamic_export': dynamic['url'],
