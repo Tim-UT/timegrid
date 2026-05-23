@@ -317,7 +317,7 @@ class SupabaseStorage:
         rows = transform(data)
         import_rows(self.writer, rows)
 
-    def save_user_fragment(self, data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False) -> None:
+    def save_user_fragment(self, data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False, exports: bool = False) -> None:
         acct = str(acct or '').strip().lower()
         if not acct:
             self.save_store(data)
@@ -346,6 +346,12 @@ class SupabaseStorage:
                 sub_id = row.get('id')
                 if sub_id in subscription_ids:
                     self.writer.patch('timegrid_subscriptions', 'id', sub_id, {k: v for k, v in row.items() if k != 'id' and v})
+        if exports:
+            self.writer.upsert(
+                'timegrid_exports',
+                [row for row in rows['exports'] if row.get('acct') == acct],
+                on_conflict='token',
+            )
 
     def reconcile_store(self, data: dict[str, Any]) -> None:
         rows = transform(data)

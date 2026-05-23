@@ -134,10 +134,10 @@ def save_store(data: dict[str, Any]) -> None:
         CALENDAR_TEXT_CACHE.clear()
 
 
-def save_user_fragment(data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False) -> None:
+def save_user_fragment(data: dict[str, Any], acct: str, *, calendars: bool = False, subscriptions: bool = False, timelines: bool = False, exports: bool = False) -> None:
     global STORE_CACHE
     if STORAGE is not None:
-        STORAGE.save_user_fragment(data, acct, calendars=calendars, subscriptions=subscriptions, timelines=timelines)
+        STORAGE.save_user_fragment(data, acct, calendars=calendars, subscriptions=subscriptions, timelines=timelines, exports=exports)
         with STORE_CACHE_LOCK:
             STORE_CACHE = copy.deepcopy(data)
         with CALENDAR_TEXT_CACHE_LOCK:
@@ -4318,7 +4318,7 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = build_personal_export_snapshot(acct, user, store, calendar_id=calendar_id)
                 token_info = ensure_export_record(store, acct, mode=mode, snapshot=snapshot, calendar_id=calendar_id)
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, exports=True)
                 self.send_json(200, {
                     'ok': True,
                     'mode': mode,
@@ -4405,7 +4405,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(404, {'error': 'not_found'})
                     return
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True, timelines=True)
                 self.send_json(200, {
                     'timeline': serialize_timeline(acct, timeline) if timeline.get('kind') != 'wrapper' else build_wrapper_timeline(acct, user, timeline),
                     'subscription': serialize_subscription(acct, target, user),
@@ -4456,7 +4456,7 @@ class Handler(BaseHTTPRequestHandler):
                     item['trashed'] = True
                     item['visible'] = False
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True)
                 payload = serialize_subscription(acct, merged, user)
                 payload['components'] = [serialize_subscription(acct, child, user) for child in component_entries(user, merged)]
                 payload['component_count'] = len(payload['components'])
@@ -4551,7 +4551,7 @@ class Handler(BaseHTTPRequestHandler):
                         item['trashed'] = True
                         item['visible'] = False
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True)
                 self.send_json(200, {'restored': [serialize_subscription(acct, sub, user, store, session) for sub in restored_children], 'original': serialize_subscription(acct, item, user, store, session)})
                 return
 
@@ -4574,7 +4574,7 @@ class Handler(BaseHTTPRequestHandler):
                     item['visible'] = False
                 sync_group_parent_component(user, item)
                 user['updated_at'] = now_iso()
-                save_store(store)
+                save_user_fragment(store, acct, subscriptions=True)
                 self.send_json(200, serialize_subscription(acct, item, user))
                 return
 
