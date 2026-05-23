@@ -101,10 +101,13 @@ python3 scripts/test_supabase_schema_contract.py
 python3 scripts/test_storage_reconcile.py
 python3 scripts/smoke_large_dataset.py
 python3 scripts/smoke_timegrid_flows.py
+python3 scripts/smoke_ui_contract.py
 ```
 
 The schema contract check proves the migration keeps the required TimeGrid
 tables, calendar/export foreign keys, indexes, constraints, and RLS enablement.
 The smoke flows cover multi-calendar personal and creator workspaces, imports,
 dynamic/static exports, edit-after-dynamic-export, published bundle lifecycle,
-timeline moves, and detach behavior.
+timeline moves, and detach behavior. The UI contract smoke guards the current
+Mastodon-only auth page and the frontend hooks for calendar tabs, dragging, and
+the explicit export calendar selector.
