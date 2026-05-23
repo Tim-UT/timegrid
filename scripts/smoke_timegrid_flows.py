@@ -100,6 +100,14 @@ def main() -> int:
                 'workspace': 'personal',
             })['calendar']
             calendar_id = created_calendar['id']
+            overflow_calendar = client.json('POST', '/api/personal/sample1/calendars', {
+                'title': 'Overflow',
+                'workspace': 'personal',
+            })['calendar']
+            moved_calendar = client.json('PATCH', f'/api/personal/sample1/calendars/{urllib.parse.quote(overflow_calendar["id"])}', {
+                'position': 0,
+            })['calendar']
+            assert moved_calendar['id'] == overflow_calendar['id']
 
             imported = client.json('POST', '/api/personal/sample1/timelines', {
                 'title': 'Imported exams',
@@ -122,6 +130,7 @@ def main() -> int:
                 ],
             })
             timeline = imported['timeline']
+            subscription = imported['subscription']
             assert timeline['calendar_id'] == calendar_id
 
             selected_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(calendar_id)}')
@@ -172,9 +181,20 @@ def main() -> int:
             status, csv_body, _ = client.request('GET', f'/api/personal/sample1/exports/current.csv?calendar_id={urllib.parse.quote(calendar_id)}')
             assert status == 200 and b'Final exam' in csv_body
 
+            moved = client.json('PATCH', f'/api/personal/sample1/subscriptions/{urllib.parse.quote(subscription["id"])}', {
+                'calendar_id': overflow_calendar['id'],
+                'workspace': 'personal',
+                'position': 0,
+            })
+            assert moved['calendar_id'] == overflow_calendar['id']
+            moved_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(overflow_calendar["id"])}')
+            assert moved_workspace['active_calendar_id'] == overflow_calendar['id']
+            assert any(item['id'] == timeline['id'] for item in moved_workspace['timelines']), 'timeline should move with dragged subscription'
+
             print(json.dumps({
                 'ok': True,
                 'calendar_id': calendar_id,
+                'moved_calendar_id': overflow_calendar['id'],
                 'timeline_id': timeline['id'],
                 'dynamic_export': dynamic['url'],
                 'static_export': static['url'],

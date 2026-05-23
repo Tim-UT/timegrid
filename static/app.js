@@ -58,6 +58,8 @@ const state = {
   authSignupError: '',
   authEmail: '',
   authDisplayName: '',
+  draggedSubscriptionId: '',
+  draggedCalendarId: '',
   timeline: null,
   draftEvent: null,
   selectedEventId: null,
@@ -1123,8 +1125,8 @@ function calendarTabs() {
   if (!calendars.length || mode === 'archive') return '';
   const activeId = state.personal?.active_calendar_id || calendars[0]?.id || '';
   return `<nav class="calendar-tabs" aria-label="Calendars">
-    ${calendars.map((item) => `
-      <button type="button" class="calendar-tab ${item.id === activeId ? 'active' : ''}" data-action="switch-calendar" data-id="${escapeHtml(item.id)}" title="${escapeHtml(item.title)}">
+    ${calendars.map((item, index) => `
+      <button type="button" class="calendar-tab ${item.id === activeId ? 'active' : ''}" data-action="switch-calendar" data-id="${escapeHtml(item.id)}" data-index="${index}" draggable="true" title="${escapeHtml(item.title)}">
         <span class="calendar-tab-color" style="background:${escapeHtml(timelineColor(item.color || '#2f7d80'))}"></span>
         <span>${escapeHtml(item.title || 'Calendar')}</span>
       </button>`).join('')}
@@ -1173,6 +1175,128 @@ function bindCalendarTabActions() {
       setBanner('', error.message);
     }
   });
+  document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => {
+    button.addEventListener('dragstart', (event) => {
+      state.draggedCalendarId = button.dataset.id || '';
+      event.dataTransfer?.setData('text/timegrid-calendar', state.draggedCalendarId);
+      event.dataTransfer?.setData('text/plain', state.draggedCalendarId);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    });
+    button.addEventListener('dragover', (event) => {
+      if (state.draggedSubscriptionId || state.draggedCalendarId) {
+        event.preventDefault();
+        button.classList.add('drag-over');
+      }
+    });
+    button.addEventListener('dragleave', () => button.classList.remove('drag-over'));
+    button.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      button.classList.remove('drag-over');
+      const targetCalendarId = button.dataset.id || '';
+      try {
+        if (state.draggedSubscriptionId) {
+          const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
+          const workspace = mode === 'creator' ? 'creator' : 'personal';
+          await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(state.draggedSubscriptionId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ calendar_id: targetCalendarId, workspace }),
+          });
+          state.activeCalendarByMode[mode] = targetCalendarId;
+          state.draggedSubscriptionId = '';
+          await loadWorkspace(mode);
+          render();
+          return;
+        }
+        if (state.draggedCalendarId && state.draggedCalendarId !== targetCalendarId) {
+          await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(state.draggedCalendarId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ position: Number(button.dataset.index || 0) }),
+          });
+          state.draggedCalendarId = '';
+          await loadWorkspace();
+          render();
+        }
+      } catch (error) {
+        state.draggedSubscriptionId = '';
+        state.draggedCalendarId = '';
+        setBanner('', error.message || 'Could not move item');
+      }
+    });
+    button.addEventListener('dragend', () => {
+      state.draggedCalendarId = '';
+      document.querySelectorAll('.calendar-tab.drag-over').forEach((node) => node.classList.remove('drag-over'));
+    });
+  });
+}
+
+function bindSubscriptionDragActions() {
+  document.querySelectorAll('[data-draggable-subscription="true"]').forEach((card) => {
+    card.addEventListener('dragstart', (event) => {
+      state.draggedSubscriptionId = card.dataset.id || '';
+      event.dataTransfer?.setData('text/timegrid-subscription', state.draggedSubscriptionId);
+      event.dataTransfer?.setData('text/plain', state.draggedSubscriptionId);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragover', (event) => {
+      if (!state.draggedSubscriptionId || state.draggedSubscriptionId === card.dataset.id) return;
+      event.preventDefault();
+      card.classList.add('drag-over');
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+    card.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      card.classList.remove('drag-over');
+      const targetId = card.dataset.id || '';
+      if (!state.draggedSubscriptionId || state.draggedSubscriptionId === targetId) return;
+      const cards = [...document.querySelectorAll('[data-draggable-subscription="true"]')];
+      const targetIndex = Math.max(0, cards.findIndex((node) => node.dataset.id === targetId));
+      try {
+        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(state.draggedSubscriptionId)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ position: targetIndex }),
+        });
+        state.draggedSubscriptionId = '';
+        await loadWorkspace();
+        render();
+      } catch (error) {
+        state.draggedSubscriptionId = '';
+        setBanner('', error.message || 'Could not reorder timeline');
+      }
+    });
+    card.addEventListener('dragend', () => {
+      state.draggedSubscriptionId = '';
+      card.classList.remove('dragging');
+      document.querySelectorAll('.sub-card.drag-over').forEach((node) => node.classList.remove('drag-over'));
+      document.querySelectorAll('.sub-list.drag-over').forEach((node) => node.classList.remove('drag-over'));
+    });
+  });
+  document.querySelector('[data-drop-subscription-list="true"]')?.addEventListener('dragover', (event) => {
+    if (state.draggedSubscriptionId) {
+      event.preventDefault();
+      event.currentTarget.classList.add('drag-over');
+    }
+  });
+  document.querySelector('[data-drop-subscription-list="true"]')?.addEventListener('dragleave', (event) => {
+    event.currentTarget.classList.remove('drag-over');
+  });
+  document.querySelector('[data-drop-subscription-list="true"]')?.addEventListener('drop', async (event) => {
+    event.preventDefault();
+    event.currentTarget.classList.remove('drag-over');
+    if (!state.draggedSubscriptionId) return;
+    try {
+      await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(state.draggedSubscriptionId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ position: state.personal.subscriptions.length - 1 }),
+      });
+      state.draggedSubscriptionId = '';
+      await loadWorkspace();
+      render();
+    } catch (error) {
+      state.draggedSubscriptionId = '';
+      setBanner('', error.message || 'Could not reorder timeline');
+    }
+  });
 }
 
 function subscriptionCard(item) {
@@ -1194,8 +1318,9 @@ function subscriptionCard(item) {
       : `<button type="button" data-action="move-workspace" data-id="${item.id}" data-workspace="creator">Move to Creator manager</button>`;
   const moreControl = moveControl ? `<details class="sub-more"><summary aria-label="More actions"><span class="more-icon" aria-hidden="true"><span></span><span></span><span></span></span></summary><div class="sub-more-menu">${moveControl}</div></details>` : '';
   const cardClass = item.is_bundle ? 'sub-card bundle-card active' : 'sub-card active';
+  const dragAttrs = archiveMode ? '' : `draggable="true" data-draggable-subscription="true" data-id="${escapeHtml(item.id)}"`;
   if (item.is_bundle) {
-    return `<article class="${cardClass}" style="--timeline-color:${color}">
+    return `<article class="${cardClass}" ${dragAttrs} style="--timeline-color:${color}">
       <header>
         <div>
           <strong>${escapeHtml(item.title)}</strong>
@@ -1211,7 +1336,7 @@ function subscriptionCard(item) {
       </details>
     </article>`;
   }
-  return `<article class="${cardClass}" style="--timeline-color:${color}">
+  return `<article class="${cardClass}" ${dragAttrs} style="--timeline-color:${color}">
     <header>
       <div>
         <strong>${escapeHtml(item.title)}</strong>
@@ -1535,16 +1660,19 @@ function renderPersonal() {
       ${personalToolbar()}
       <div class="grid workspace-grid">
         <aside class="sidebar workspace-sidebar">
-          <section class="sidebar-section subscriptions-panel">
-            <div class="section-header subscriptions-section-header">
-              <h2>${subscriptionLabel} <span class="section-count">${state.personal.subscriptions.length}</span></h2>
-              ${archiveMode || !state.personal.subscriptions.length ? '' : `<button type="button" class="subtle" data-action="toggle-all-visible" data-visible="${String(!state.personal.subscriptions.every((item) => item.visible !== false))}">${state.personal.subscriptions.every((item) => item.visible !== false) ? 'Hide all' : 'Show all'}</button>`}
-            </div>
-            ${state.personal.subscriptions.length ? '' : (archiveMode ? '<div class="empty">Archived timelines stay on the server but are not meant for active editing.</div>' : '<div class="muted sidebar-note">Use Import to add a URL or calendar file.</div>')}
-            <div class="sub-list">
-              ${state.personal.subscriptions.length ? state.personal.subscriptions.map(subscriptionCard).join('') : `<div class="empty">${archiveMode ? 'No archived timelines yet.' : 'No subscriptions yet. Add holiday links, F1 schedules, or other TimeGrid pages here.'}</div>`}
-            </div>
-          </section>
+          <div class="workspace-left-stack">
+            ${calendarTabs()}
+            <section class="sidebar-section subscriptions-panel">
+              <div class="section-header subscriptions-section-header">
+                <h2>${subscriptionLabel} <span class="section-count">${state.personal.subscriptions.length}</span></h2>
+                ${archiveMode || !state.personal.subscriptions.length ? '' : `<button type="button" class="subtle" data-action="toggle-all-visible" data-visible="${String(!state.personal.subscriptions.every((item) => item.visible !== false))}">${state.personal.subscriptions.every((item) => item.visible !== false) ? 'Hide all' : 'Show all'}</button>`}
+              </div>
+              ${state.personal.subscriptions.length ? '' : (archiveMode ? '<div class="empty">Archived timelines stay on the server but are not meant for active editing.</div>' : '<div class="muted sidebar-note">Use Import to add a URL or calendar file.</div>')}
+              <div class="sub-list" data-drop-subscription-list="true">
+                ${state.personal.subscriptions.length ? state.personal.subscriptions.map(subscriptionCard).join('') : `<div class="empty">${archiveMode ? 'No archived timelines yet.' : 'No subscriptions yet. Add holiday links, F1 schedules, or other TimeGrid pages here.'}</div>`}
+              </div>
+            </section>
+          </div>
           ${archiveMode ? '' : `<section class="sidebar-section">
             <div class="section-header trash-section-header">
               <h3>Trash <span class="section-count">${state.personal.trash.length}</span></h3>
@@ -1556,7 +1684,6 @@ function renderPersonal() {
           </section>`}
         </aside>
         <main class="main-panel workspace-main">
-          ${calendarTabs()}
           <div class="calendar-stage">
             ${mastodonProvisioningBanner()}
             ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
@@ -1622,6 +1749,7 @@ function renderPersonal() {
   document.querySelector('[data-action="logout"]')?.addEventListener('click', logout);
   document.querySelector('[data-action="go-mastodon-home"]')?.addEventListener('click', goToMastodonHome);
   bindCalendarTabActions();
+  bindSubscriptionDragActions();
   bindNoticeActions(renderPersonal);
   bindEventDetailActions();
   bindExportActions();
@@ -3179,13 +3307,8 @@ function renderAuthHub() {
   ];
   const mastodonProvider = providers.find((item) => item.id === 'mastodon');
   const emailProvider = providers.find((item) => item.id === 'email' && item.native_email_auth);
-  const externalProviders = providers.filter((item) => item.id !== 'mastodon' && item.id !== 'email' && item.login_href);
-  const setupProviders = providers.filter((item) => item.id !== 'mastodon' && item.id !== 'email' && item.status && item.status !== 'active');
-  const providerSummary = externalProviders.length
-    ? 'Use Google or Apple for the fastest start, email for a portable account, or Mastodon for the social TimeGrid identity.'
-    : (setupProviders.length
-      ? `${setupProviders.map((item) => item.label).join(' and ')} setup is pending in Supabase.`
-      : 'Mastodon is live now. Add Supabase keys to enable Google, Apple, and email auth here.');
+  const externalProviders = providers.filter((item) => !['mastodon', 'email', 'google', 'apple'].includes(item.id) && item.login_href);
+  const providerSummary = 'Use email for TimeGrid calendar access, or Mastodon for the social TimeGrid identity.';
   const isSignup = state.authMode !== 'login';
   root.innerHTML = `
     <div class="auth-shell">
@@ -3204,7 +3327,6 @@ function renderAuthHub() {
           ${externalProviders.map((provider) => `<a class="button auth-provider-button ${provider.id === 'google' ? 'primary' : ''}" href="${escapeHtml(provider.login_href || '#')}">Continue with ${escapeHtml(provider.label)}</a>`).join('')}
           ${mastodonProvider ? `<a class="button auth-provider-button" href="${escapeHtml(mastodonProvider.login_href || mastodonLoginHref(nextPath))}">Continue with Mastodon</a>` : ''}
         </div>
-        ${setupProviders.length ? `<div class="auth-help">${setupProviders.map((provider) => `${escapeHtml(provider.label)}: ${escapeHtml(provider.description || 'Provider setup is pending.')}`).join('<br />')}</div>` : ''}
         ${emailProvider ? `
           <form class="auth-email-form" id="auth-email-form">
             ${isSignup ? `<label>Display name<input name="display_name" autocomplete="name" placeholder="Ada Lovelace" value="${escapeHtml(state.authDisplayName)}" /></label>` : ''}

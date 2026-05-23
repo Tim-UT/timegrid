@@ -859,6 +859,36 @@ def find_timeline(user: dict[str, Any], timeline_id: str) -> dict[str, Any] | No
     return next((item for item in user.get('timelines', []) if item.get('id') == timeline_id), None)
 
 
+def normalize_positions(items: list[dict[str, Any]]) -> None:
+    for index, item in enumerate(items):
+        item['position'] = index
+
+
+def move_item_to_position(items: list[dict[str, Any]], item: dict[str, Any], position: Any) -> None:
+    if item not in items:
+        return
+    try:
+        target = int(position)
+    except (TypeError, ValueError):
+        target = len(items) - 1
+    items.remove(item)
+    target = max(0, min(target, len(items)))
+    items.insert(target, item)
+    normalize_positions(items)
+
+
+def move_subscription_to_calendar(user: dict[str, Any], item: dict[str, Any], calendar_id: str, workspace: str) -> None:
+    item['calendar_id'] = calendar_id
+    item['workspace'] = workspace
+    item['creator_archived'] = workspace == 'archive'
+    timeline_id = item.get('owned_timeline_id')
+    timeline = find_timeline(user, timeline_id) if timeline_id else None
+    if timeline:
+        timeline['calendar_id'] = calendar_id
+        timeline['workspace'] = workspace
+        timeline['updated_at'] = now_iso()
+
+
 def migrate_merged_groups(user: dict[str, Any]) -> None:
     for item in user.get('subscriptions', []):
         if item.get('kind') != 'bundle':
@@ -4474,6 +4504,33 @@ class Handler(BaseHTTPRequestHandler):
             store = load_store()
             user = ensure_user(store, acct)
 
+            if parts[3] == 'calendars':
+                calendar = next((item for item in ensure_user_calendars(user) if item.get('id') == parts[4]), None)
+                if not calendar:
+                    self.send_json(404, {'error': 'not_found'})
+                    return
+                workspace = str(calendar.get('workspace') or 'personal')
+                if 'title' in body:
+                    title = str(body.get('title') or '').strip()
+                    if title:
+                        calendar['title'] = title
+                if 'color' in body:
+                    color = str(body.get('color') or '').strip()
+                    if color:
+                        calendar['color'] = color
+                if 'position' in body:
+                    workspace_calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace and not item.get('archived')]
+                    move_item_to_position(workspace_calendars, calendar, body.get('position'))
+                    position_by_id = {item.get('id'): item.get('position') for item in workspace_calendars}
+                    for item in user.get('calendars', []):
+                        if item.get('workspace') == workspace and item.get('id') in position_by_id:
+                            item['position'] = position_by_id[item.get('id')]
+                calendar['updated_at'] = now_iso()
+                user['updated_at'] = now_iso()
+                save_store(store)
+                self.send_json(200, {'calendar': calendar, 'calendars': [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace and not item.get('archived')]})
+                return
+
             if parts[3] == 'published':
                 slug = parts[4]
                 bundle = store.get('published', {}).get(slug)
@@ -4562,6 +4619,12 @@ class Handler(BaseHTTPRequestHandler):
                 if 'creator_archived' in body:
                     item['workspace'] = 'archive' if bool(body['creator_archived']) else 'creator'
                     item['creator_archived'] = bool(body['creator_archived'])
+                if 'calendar_id' in body:
+                    workspace = str(body.get('workspace') or item.get('workspace') or 'personal').strip().lower()
+                    if workspace not in {'personal', 'creator'}:
+                        workspace = 'creator' if workspace == 'archive' else 'personal'
+                    calendar_id = resolve_calendar_id(user, str(body.get('calendar_id') or ''), workspace)
+                    move_subscription_to_calendar(user, item, calendar_id, workspace)
                 if 'color' in body:
                     color = str(body['color']).strip()
                     if color:
@@ -4574,6 +4637,8 @@ class Handler(BaseHTTPRequestHandler):
                     item['trashed'] = bool(body['trashed'])
                     if item['trashed']:
                         item['visible'] = False
+                if 'position' in body:
+                    move_item_to_position(user.get('subscriptions', []), item, body.get('position'))
                 user['updated_at'] = now_iso()
                 save_store(store)
                 self.send_json(200, serialize_subscription(acct, item, user))
@@ -4635,10 +4700,18 @@ class Handler(BaseHTTPRequestHandler):
                         timeline['color'] = color
                 if 'events' in body:
                     timeline['events'] = [strip_editor_event(item) for item in (body.get('events') or [])]
+                if 'calendar_id' in body:
+                    workspace = str(body.get('workspace') or timeline.get('workspace') or 'personal').strip().lower()
+                    if workspace not in {'personal', 'creator'}:
+                        workspace = 'personal'
+                    timeline['calendar_id'] = resolve_calendar_id(user, str(body.get('calendar_id') or ''), workspace)
+                    timeline['workspace'] = workspace
                 timeline['updated_at'] = now_iso()
                 sub = sync_timeline_subscription(acct, user, timeline)
                 if sub and timeline.get('color'):
                     sub['color'] = timeline.get('color')
+                if sub and timeline.get('calendar_id'):
+                    move_subscription_to_calendar(user, sub, timeline.get('calendar_id'), timeline.get('workspace') or 'personal')
                 user['updated_at'] = now_iso()
                 save_store(store)
                 sub = find_subscription(user, timeline['subscription_id'])

@@ -283,6 +283,9 @@ iframe {
   margin-top: 20px;
   align-items: start;
 }
+.workspace-grid {
+  grid-template-columns: minmax(470px, 520px) minmax(0, 1fr);
+}
 .sidebar, .main-panel, .landing-card, .published-hero, .published-frame, .published-meta, .meta-card {
   background: rgba(255, 253, 248, 0.9);
   border: 1px solid rgba(216, 207, 196, 0.9);
@@ -3341,8 +3344,8 @@ button.tinted:hover {
   flex-direction: column;
   gap: 6px;
   align-items: stretch;
-  width: 148px;
-  flex: 0 0 148px;
+  width: 132px;
+  flex: 0 0 132px;
   padding: 8px;
   border-right: 1px solid var(--line);
 }
@@ -3363,9 +3366,14 @@ button.tinted:hover {
 }
 
 .calendar-tab:hover,
-.calendar-tab.active {
+.calendar-tab.active,
+.calendar-tab.drag-over {
   background: var(--panel-subtle);
   border-color: var(--line);
+}
+.calendar-tab.drag-over {
+  outline: 2px solid rgba(31, 111, 120, 0.32);
+  outline-offset: 2px;
 }
 
 .calendar-tab-color {
@@ -3382,8 +3390,7 @@ button.tinted:hover {
 }
 
 .workspace-main {
-  display: flex;
-  align-items: stretch;
+  display: block;
 }
 
 .workspace-main .calendar-stage,
@@ -3395,6 +3402,31 @@ button.tinted:hover {
 .editor-main {
   display: flex;
   align-items: stretch;
+}
+
+.workspace-left-stack {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.workspace-left-stack .subscriptions-panel {
+  min-width: 0;
+  flex: 1;
+}
+
+.sub-card[draggable="true"] {
+  cursor: grab;
+}
+
+.sub-card.dragging {
+  opacity: 0.55;
+}
+
+.sub-card.drag-over,
+.sub-list.drag-over {
+  outline: 2px dashed rgba(31, 111, 120, 0.42);
+  outline-offset: 4px;
 }
 
 .landing-faq {
@@ -3440,6 +3472,15 @@ button.tinted:hover {
   .workspace-main,
   .editor-main {
     display: block;
+  }
+
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-left-stack {
+    display: grid;
+    gap: 10px;
   }
 
   .calendar-tabs {
