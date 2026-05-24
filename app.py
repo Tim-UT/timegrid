@@ -4202,12 +4202,15 @@ class Handler(BaseHTTPRequestHandler):
             title = str(body.get('title') or '').strip()[:160]
             notice_body = str(body.get('body') or '').strip()[:600]
             href = str(body.get('href') or '').strip()[:240]
+            kind = str(body.get('kind') or 'workspace_notice').strip()
+            if kind not in {'workspace_notice', 'workspace_error'}:
+                kind = 'workspace_notice'
             if not title:
                 self.send_json(400, {'error': 'title_required'})
                 return
             add_notification(
                 user,
-                kind='workspace_notice',
+                kind=kind,
                 title=title,
                 body=notice_body,
                 actor_acct=session['acct'],

@@ -498,7 +498,7 @@ function recordNotice(message, isError = false) {
   state.noticesUnread = Number(state.noticesUnread || 0) + 1;
   api('/api/notifications', {
     method: 'POST',
-    body: JSON.stringify({ title, body, href }),
+    body: JSON.stringify({ title, body, href, kind: localItem.kind }),
   }).then((data) => {
     if (data?.item) {
       state.notices = (state.notices || []).map((item) => item.id === localId ? data.item : item);
@@ -661,7 +661,7 @@ function noticeToastMarkup() {
   const classes = ['notice-toast'];
   if (notice.error) classes.push('error');
   if (notice.exiting) classes.push('exiting');
-  return `<div class="${classes.join(' ')}" role="status">${escapeHtml(notice.message)}</div>`;
+  return `<div class="${classes.join(' ')}" role="${notice.error ? 'alert' : 'status'}">${escapeHtml(notice.message)}</div>`;
 }
 
 function notificationsButton() {

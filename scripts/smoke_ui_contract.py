@@ -144,6 +144,8 @@ def main() -> int:
                 'data-draggable-subscription="true"',
                 'noticeToastMarkup()',
                 'recordNotice(text, Boolean(error))',
+                "kind: localItem.kind",
+                'role="${notice.error ? \'alert\' : \'status\'}"',
                 'state.error = \'\';',
                 'persistSubscriptionPosition(subscriptionId, targetIndex, snapshot)',
                 'persistCalendarPosition(calendarId, targetIndex, snapshot)',
@@ -169,11 +171,13 @@ def main() -> int:
                 'title': 'UI contract notice',
                 'body': 'Notifications should live in the bell area.',
                 'href': '/u/sample1',
+                'kind': 'workspace_error',
             })
             assert notice.get('item', {}).get('title') == 'UI contract notice'
+            assert notice.get('item', {}).get('kind') == 'workspace_error'
             notices = client.json('GET', '/api/notifications')
             assert notices.get('unread', 0) >= 1
-            assert any(item.get('title') == 'UI contract notice' for item in notices.get('items') or [])
+            assert any(item.get('title') == 'UI contract notice' and item.get('kind') == 'workspace_error' for item in notices.get('items') or [])
 
             created = client.json('POST', '/api/personal/sample1/calendars', {
                 'title': 'UI export chooser',
