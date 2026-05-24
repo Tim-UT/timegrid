@@ -23,6 +23,13 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault('MASTODON_CLIENT_ID', 'dummy')
 os.environ.setdefault('MASTODON_CLIENT_SECRET', 'dummy')
 os.environ.setdefault('TIMEGRID_ENABLE_TEST_LOGIN', 'true')
+os.environ.setdefault('GOOGLE_CLIENT_ID', 'dummy-google-client')
+os.environ.setdefault('GOOGLE_CLIENT_SECRET', 'dummy-google-secret')
+os.environ.setdefault('APPLE_CLIENT_ID', 'dummy-apple-client')
+os.environ.setdefault('APPLE_CLIENT_SECRET', 'dummy-apple-secret')
+os.environ.setdefault('UOFT_OIDC_DISCOVERY_URL', 'https://example.invalid/.well-known/openid-configuration')
+os.environ.setdefault('UOFT_CLIENT_ID', 'dummy-uoft-client')
+os.environ.setdefault('UOFT_CLIENT_SECRET', 'dummy-uoft-secret')
 
 import app  # noqa: E402
 
@@ -104,6 +111,10 @@ def main() -> int:
             assert 'type="email"' not in auth_html
             assert 'Continue with Google' not in auth_html
             assert 'Continue with Apple' not in auth_html
+
+            auth_options = client.json('GET', '/api/auth/options?next=%2F')
+            providers = auth_options.get('providers') or []
+            assert [item.get('id') for item in providers] == ['mastodon'], providers
 
             app_js = client.text('/app.js')
             for marker in [

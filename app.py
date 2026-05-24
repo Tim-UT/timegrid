@@ -384,29 +384,13 @@ def external_provider_config(provider_id: str) -> dict[str, Any] | None:
 
 
 def configured_auth_providers() -> list[dict[str, Any]]:
-    providers = [
-        {
-            'id': 'mastodon',
-            'label': 'Mastodon',
-            'description': 'Sign in with your linked social.time-grid.org account.',
-            'status': 'active',
-            'provisions_mastodon': True,
-        },
-    ]
-    for provider_id in ('google', 'apple', 'uoft'):
-        if supabase_auth_enabled() and provider_id in {'google', 'apple'}:
-            continue
-        config = external_provider_config(provider_id)
-        if not config:
-            continue
-        providers.append({
-            'id': config['id'],
-            'label': config['label'],
-            'description': config['description'],
-            'status': 'active',
-            'provisions_mastodon': False,
-        })
-    return providers
+    return [{
+        'id': 'mastodon',
+        'label': 'Mastodon',
+        'description': 'Sign in with your linked social.time-grid.org account.',
+        'status': 'active',
+        'provisions_mastodon': True,
+    }]
 
 
 def verify_password(password: str, record: dict[str, Any]) -> bool:
