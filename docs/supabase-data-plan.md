@@ -108,6 +108,7 @@ Run these checks before changing the Supabase schema or storage mapping:
 python3 scripts/test_supabase_schema_contract.py
 python3 scripts/test_storage_reconcile.py
 python3 scripts/smoke_large_dataset.py
+python3 scripts/smoke_auth_feature_flags.py
 python3 scripts/smoke_performance_budget.py
 python3 scripts/smoke_timegrid_flows.py
 python3 scripts/smoke_ui_contract.py
@@ -122,4 +123,7 @@ timeline moves, and detach behavior. The performance budget smoke keeps the
 calendar create/switch, timeline create, timeline move, and export paths under
 the local 0.5s target. The UI contract smoke guards the current Mastodon-only
 auth page and the frontend hooks for calendar tabs, dragging, and the explicit
-export calendar selector.
+export calendar selector. The auth feature-flag smoke verifies the hidden
+Supabase email and OAuth session routes with mocked Supabase Auth responses and
+example addresses (`student@example.edu`, `google.student@example.edu`) without
+sending real email.

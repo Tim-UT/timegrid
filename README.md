@@ -140,6 +140,7 @@ publishing, or export behavior:
 python3 scripts/test_supabase_schema_contract.py
 python3 scripts/test_storage_reconcile.py
 python3 scripts/smoke_large_dataset.py
+python3 scripts/smoke_auth_feature_flags.py
 python3 scripts/smoke_performance_budget.py
 python3 scripts/smoke_timegrid_flows.py
 python3 scripts/smoke_ui_contract.py
@@ -149,7 +150,9 @@ The smoke suite covers Supabase schema expectations, fragment persistence,
 large dataset transformation, calendar create/switch/move performance, duplicate
 calendar names, personal and creator calendar creation, imports, publish/archive,
 dynamic and static exports, edit-after-dynamic-export, CSV export, timeline
-moves, detach behavior, Mastodon-only auth UI, and export calendar selectors.
+moves, detach behavior, Mastodon-only auth UI, feature-gated Supabase
+email/OAuth session wiring with example test addresses, and export calendar
+selectors.
 
 ### Calendar runtime files
 
