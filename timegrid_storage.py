@@ -9,7 +9,10 @@ from typing import Any
 
 import requests
 
-from scripts.import_json_to_supabase import SupabaseRest, import_rows, normalize_rows, transform
+try:
+    from scripts.import_json_to_supabase import SupabaseRest, import_rows, normalize_rows, transform
+except ModuleNotFoundError:
+    from import_json_to_supabase import SupabaseRest, import_rows, normalize_rows, transform
 
 
 def parse_datetime(value: Any) -> datetime | None:
