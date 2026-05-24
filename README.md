@@ -100,11 +100,15 @@ The calendar app reads configuration from `.env`.
 - `SUPABASE_URL`: Supabase project URL for TimeGrid calendar data
 - `SUPABASE_ANON_KEY`: browser-safe Supabase anon key
 - `SUPABASE_SERVICE_ROLE_KEY`: server-only key used by the Python backend
+- `TIMEGRID_ENABLE_EMAIL_AUTH`: optional email/password auth flag; keep `false`
+  until SMTP/email delivery is configured
+- `TIMEGRID_ENABLE_EXTERNAL_AUTH`: optional Google/Apple/OIDC auth flag; keep
+  `false` until those providers are configured
 
 Current public auth uses Mastodon OAuth only. Email/password, Google, and Apple
 identity rows are supported by the data model for future expansion, but their
-buttons are intentionally hidden until those providers and email delivery are
-configured.
+buttons and direct auth routes are intentionally disabled until those providers
+and email delivery are configured.
 
 ### TimeGrid data model
 

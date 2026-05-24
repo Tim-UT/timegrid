@@ -23,6 +23,10 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault('MASTODON_CLIENT_ID', 'dummy')
 os.environ.setdefault('MASTODON_CLIENT_SECRET', 'dummy')
 os.environ.setdefault('TIMEGRID_ENABLE_TEST_LOGIN', 'true')
+os.environ.setdefault('SUPABASE_URL', 'https://example.supabase.co')
+os.environ.setdefault('SUPABASE_ANON_KEY', 'dummy-anon-key')
+os.environ.setdefault('TIMEGRID_ENABLE_EMAIL_AUTH', 'false')
+os.environ.setdefault('TIMEGRID_ENABLE_EXTERNAL_AUTH', 'false')
 os.environ.setdefault('GOOGLE_CLIENT_ID', 'dummy-google-client')
 os.environ.setdefault('GOOGLE_CLIENT_SECRET', 'dummy-google-secret')
 os.environ.setdefault('APPLE_CLIENT_ID', 'dummy-apple-client')
@@ -115,6 +119,22 @@ def main() -> int:
             auth_options = client.json('GET', '/api/auth/options?next=%2F')
             providers = auth_options.get('providers') or []
             assert [item.get('id') for item in providers] == ['mastodon'], providers
+
+            status, _body, _headers = client.request('POST', '/api/auth/email/signup', {
+                'email': 'student@example.com',
+                'password': 'correct horse battery staple',
+                'display_name': 'Student Example',
+            })
+            assert status == 404, f'email signup should be disabled in Mastodon-only phase, got {status}'
+            status, _body, _headers = client.request('POST', '/api/auth/email/login', {
+                'email': 'student@example.com',
+                'password': 'correct horse battery staple',
+            })
+            assert status == 404, f'email login should be disabled in Mastodon-only phase, got {status}'
+            status, _body, _headers = client.request('POST', '/api/auth/supabase/session', {
+                'access_token': 'dummy-token',
+            })
+            assert status == 404, f'Supabase token session should be disabled in Mastodon-only phase, got {status}'
 
             app_js = client.text('/app.js')
             for marker in [

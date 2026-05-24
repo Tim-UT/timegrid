@@ -260,6 +260,14 @@ def supabase_auth_enabled() -> bool:
     return bool(SUPABASE_URL and SUPABASE_ANON_KEY)
 
 
+def email_auth_enabled() -> bool:
+    return supabase_auth_enabled() and env_value('TIMEGRID_ENABLE_EMAIL_AUTH').lower() == 'true'
+
+
+def external_auth_enabled() -> bool:
+    return supabase_auth_enabled() and env_value('TIMEGRID_ENABLE_EXTERNAL_AUTH').lower() == 'true'
+
+
 def supabase_auth_headers(access_token: str = '') -> dict[str, str]:
     token = access_token or SUPABASE_ANON_KEY
     return {
@@ -325,6 +333,8 @@ def load_oidc_discovery(url: str) -> dict[str, Any]:
 def external_provider_config(provider_id: str) -> dict[str, Any] | None:
     pid = str(provider_id or '').strip().lower()
     if pid == 'google':
+        if not external_auth_enabled():
+            return None
         client_id = env_value('GOOGLE_CLIENT_ID')
         client_secret = env_value('GOOGLE_CLIENT_SECRET')
         if not client_id or not client_secret:
@@ -343,6 +353,8 @@ def external_provider_config(provider_id: str) -> dict[str, Any] | None:
             'callback_method': 'GET',
         }
     if pid == 'apple':
+        if not external_auth_enabled():
+            return None
         client_id = env_value('APPLE_CLIENT_ID')
         client_secret = env_value('APPLE_CLIENT_SECRET')
         if not client_id or not client_secret:
@@ -361,6 +373,8 @@ def external_provider_config(provider_id: str) -> dict[str, Any] | None:
             'response_mode': 'form_post',
         }
     if pid == 'uoft':
+        if not external_auth_enabled():
+            return None
         discovery_url = env_value('UOFT_OIDC_DISCOVERY_URL')
         client_id = env_value('UOFT_CLIENT_ID')
         client_secret = env_value('UOFT_CLIENT_SECRET')
@@ -4026,8 +4040,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/auth/email/signup':
-            if not supabase_auth_enabled():
-                self.send_json(403, {'error': 'supabase_auth_disabled'})
+            if not email_auth_enabled():
+                self.send_json(404, {'error': 'not_found'})
                 return
             body = self.parse_json_body()
             email = str(body.get('email') or '').strip().lower()
@@ -4069,8 +4083,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/auth/email/login':
-            if not supabase_auth_enabled():
-                self.send_json(403, {'error': 'supabase_auth_disabled'})
+            if not email_auth_enabled():
+                self.send_json(404, {'error': 'not_found'})
                 return
             body = self.parse_json_body()
             email = str(body.get('email') or '').strip().lower()
@@ -4104,8 +4118,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/api/auth/supabase/session':
-            if not supabase_auth_enabled():
-                self.send_json(403, {'error': 'supabase_auth_disabled'})
+            if not (email_auth_enabled() or external_auth_enabled()):
+                self.send_json(404, {'error': 'not_found'})
                 return
             body = self.parse_json_body()
             access_token = str(body.get('access_token') or '').strip()

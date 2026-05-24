@@ -12,6 +12,8 @@ TIMEGRID_STORAGE=supabase
 SUPABASE_URL=https://kivxtaprfkonlifigery.supabase.co
 SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
+TIMEGRID_ENABLE_EMAIL_AUTH=false
+TIMEGRID_ENABLE_EXTERNAL_AUTH=false
 ```
 
 `SUPABASE_ANON_KEY` is safe for browser-driven Auth requests. The service-role
@@ -38,7 +40,9 @@ This phase uses:
 
 Email/password, Google, and Apple buttons are intentionally hidden for now.
 Mastodon email/SMPP delivery is the active account creation path. Email/password
-can be restored later after a custom SMTP provider is configured.
+and external Supabase Auth routes are disabled unless their explicit feature
+flags are set to `true`. Restore them later only after a custom SMTP provider
+and OAuth providers are configured.
 
 ## Local Browser QA
 
