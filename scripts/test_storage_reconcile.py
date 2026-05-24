@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from timegrid_storage import SupabaseStorage
 from scripts.generate_sample_store import build_store
+from scripts.import_json_to_supabase import transform
 
 
 class FakeWriter:
@@ -44,6 +45,45 @@ class FakeStorage(SupabaseStorage):
 
     def delete_key(self, table: str, pk_columns: tuple[str, ...], key: tuple[Any, ...]) -> None:
         self.deleted.append((table, key))
+
+
+class FakeReadableStorage(SupabaseStorage):
+    def __init__(self, table_rows: dict[str, list[dict[str, Any]]]) -> None:
+        self.table_rows = table_rows
+
+    def get_rows(self, table: str, *, order: str = '') -> list[dict[str, Any]]:
+        rows = list(self.table_rows.get(table, []))
+        if order:
+            column = order.split('.', 1)[0]
+            rows.sort(key=lambda row: row.get(column) or 0)
+        return rows
+
+
+def rows_as_imported(rows: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    table_rows = {
+        'timegrid_users': list(rows['users']),
+        'timegrid_auth_identities': list(rows['identities']),
+        'timegrid_calendars': list(rows['calendars']),
+        'timegrid_timelines': [dict(row) for row in rows['timelines_initial']],
+        'timegrid_subscriptions': [dict(row) for row in rows['subscriptions_initial']],
+        'timegrid_published_bundles': list(rows['published']),
+        'timegrid_published_bundle_items': list(rows['published_items']),
+        'timegrid_exports': list(rows['exports']),
+        'timegrid_notifications': list(rows['notifications']),
+        'timegrid_signup_intents': list(rows['signup_intents']),
+    }
+    timelines_by_id = {row['id']: row for row in table_rows['timegrid_timelines']}
+    for link in rows['timeline_subscription_links']:
+        if link['id'] in timelines_by_id:
+            timelines_by_id[link['id']]['subscription_id'] = link['subscription_id']
+    subscriptions_by_id = {row['id']: row for row in table_rows['timegrid_subscriptions']}
+    for link in rows['subscription_fk_links']:
+        subscription = subscriptions_by_id.get(link['id'])
+        if subscription:
+            for key in ('owned_timeline_id', 'grouped_in', 'bundle_overlay_for', 'shell_source_id'):
+                if link.get(key):
+                    subscription[key] = link[key]
+    return table_rows
 
 
 def main() -> int:
@@ -106,7 +146,47 @@ def main() -> int:
     assert {row['acct'] for row in notification_rows} == {'sample1'}
     assert all(not str(value).startswith(('tl_u2_', 'sub_u2_')) for _table, _column, value, _payload in fragment_storage.writer.patches)
 
-    print({'ok': True, 'deleted': storage.deleted, 'fragment_upserts': len(upserts), 'fragment_patches': len(fragment_storage.writer.patches)})
+    roundtrip_store = build_store(users=1, timelines_per_user=6, events_per_timeline=2)
+    roundtrip_user = roundtrip_store['users']['sample1']
+    roundtrip_user.setdefault('calendars', [])
+    extra_calendar = {
+        'id': 'cal_sample1_lab',
+        'workspace': 'personal',
+        'title': 'Lab',
+        'color': '#577590',
+        'position': 2,
+        'is_default': False,
+        'archived': False,
+        'created_at': roundtrip_user['updated_at'],
+        'updated_at': roundtrip_user['updated_at'],
+    }
+    roundtrip_user['calendars'].append(extra_calendar)
+    target_timeline = roundtrip_user['timelines'][0]
+    target_subscription = next(item for item in roundtrip_user['subscriptions'] if item.get('id') == target_timeline.get('subscription_id'))
+    target_timeline['calendar_id'] = extra_calendar['id']
+    target_subscription['calendar_id'] = extra_calendar['id']
+    roundtrip_store['exports']['lab_dynamic'] = {
+        'acct': 'sample1',
+        'calendar_id': extra_calendar['id'],
+        'kind': 'dynamic',
+        'snapshot': {'metadata': {'title': 'Lab export'}},
+        'ics_text': '',
+        'created_at': roundtrip_user['updated_at'],
+        'updated_at': roundtrip_user['updated_at'],
+    }
+    rows = transform(roundtrip_store)
+    reloaded = FakeReadableStorage(rows_as_imported(rows)).load_store()
+    reloaded_user = reloaded['users']['sample1']
+    assert any(item['id'] == extra_calendar['id'] and item['title'] == 'Lab' for item in reloaded_user['calendars'])
+    reloaded_timeline = next(item for item in reloaded_user['timelines'] if item['id'] == target_timeline['id'])
+    reloaded_subscription = next(item for item in reloaded_user['subscriptions'] if item['id'] == target_subscription['id'])
+    assert reloaded_timeline['calendar_id'] == extra_calendar['id']
+    assert reloaded_timeline['subscription_id'] == target_subscription['id']
+    assert reloaded_subscription['calendar_id'] == extra_calendar['id']
+    assert reloaded_subscription['owned_timeline_id'] == target_timeline['id']
+    assert reloaded['exports']['lab_dynamic']['calendar_id'] == extra_calendar['id']
+
+    print({'ok': True, 'deleted': storage.deleted, 'fragment_upserts': len(upserts), 'fragment_patches': len(fragment_storage.writer.patches), 'roundtrip_calendars': len(reloaded_user['calendars'])})
     return 0
 
 
