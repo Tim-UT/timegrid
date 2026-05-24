@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ def table_url(base_url: str, table: str, *, query: str = '') -> str:
 
 
 class SupabaseRest:
+    TRANSIENT_ERROR_CODES = ('40P01', '40001', '55P03')
+
     def __init__(self, url: str, service_key: str, *, dry_run: bool = False) -> None:
         self.url = url.rstrip('/')
         self.dry_run = dry_run
@@ -49,6 +52,17 @@ class SupabaseRest:
             'Content-Type': 'application/json',
         })
 
+    def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        last_resp: requests.Response | None = None
+        for attempt in range(4):
+            resp = self.session.request(method, url, **kwargs)
+            if resp.status_code < 500 or not any(code in resp.text for code in self.TRANSIENT_ERROR_CODES):
+                return resp
+            last_resp = resp
+            time.sleep(0.15 * (2 ** attempt))
+        assert last_resp is not None
+        return last_resp
+
     def upsert(self, table: str, rows: list[dict[str, Any]], *, on_conflict: str) -> None:
         rows = normalize_rows(rows)
         if not rows:
@@ -58,16 +72,27 @@ class SupabaseRest:
             return
         headers = {'Prefer': 'resolution=merge-duplicates'}
         query = f'on_conflict={on_conflict}'
-        resp = self.session.post(table_url(self.url, table, query=query), headers=headers, data=json.dumps(rows))
+        resp = self._request_with_retry(
+            'POST',
+            table_url(self.url, table, query=query),
+            headers=headers,
+            data=json.dumps(rows),
+        )
         if resp.status_code >= 400:
             raise RuntimeError(f'{table} upsert failed: {resp.status_code} {resp.text[:1000]}')
 
     def patch(self, table: str, match_column: str, match_value: str, payload: dict[str, Any]) -> None:
+        if not payload:
+            return
         if self.dry_run:
             print(f'dry-run patch {table}: {match_column}={match_value}')
             return
         query = f'{match_column}=eq.{requests.utils.quote(match_value, safe="")}'
-        resp = self.session.patch(table_url(self.url, table, query=query), data=json.dumps(payload))
+        resp = self._request_with_retry(
+            'PATCH',
+            table_url(self.url, table, query=query),
+            data=json.dumps(payload),
+        )
         if resp.status_code >= 400:
             raise RuntimeError(f'{table} patch failed: {resp.status_code} {resp.text[:1000]}')
 
