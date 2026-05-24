@@ -8,6 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'supabase' / 'migrations' / '202605230001_initial_timegrid_data.sql'
 LOCKDOWN_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524024404_lock_timegrid_service_role_access.sql'
+PERFORMANCE_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524143708_add_timegrid_fk_indexes_and_function_search_path.sql'
+RLS_HELPER_LOCKDOWN_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524143829_revoke_public_execute_on_rls_auto_enable.sql'
+CITEXT_EXTENSION_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524143948_move_citext_extension_out_of_public.sql'
 
 
 def table_block(sql: str, table: str) -> str:
@@ -27,6 +30,9 @@ def assert_columns(block: str, table: str, columns: list[str]) -> None:
 def main() -> int:
     sql = MIGRATION.read_text(encoding='utf-8')
     lockdown_sql = LOCKDOWN_MIGRATION.read_text(encoding='utf-8').lower()
+    performance_sql = PERFORMANCE_MIGRATION.read_text(encoding='utf-8').lower()
+    rls_helper_lockdown_sql = RLS_HELPER_LOCKDOWN_MIGRATION.read_text(encoding='utf-8').lower()
+    citext_extension_sql = CITEXT_EXTENSION_MIGRATION.read_text(encoding='utf-8').lower()
     required_columns = {
         'timegrid_users': ['acct', 'supabase_user_id', 'mastodon_profile', 'onboarding'],
         'timegrid_auth_identities': ['acct', 'provider', 'provider_subject', 'email', 'supabase_user_id'],
@@ -63,6 +69,28 @@ def main() -> int:
     for index in required_indexes:
         if index not in sql:
             raise AssertionError(f'missing index {index}')
+    required_fk_indexes = [
+        'timegrid_exports_calendar_fk_idx',
+        'timegrid_published_bundle_items_subscription_fk_idx',
+        'timegrid_subscriptions_bundle_overlay_for_fk_idx',
+        'timegrid_subscriptions_calendar_fk_idx',
+        'timegrid_subscriptions_shell_source_id_fk_idx',
+        'timegrid_timelines_calendar_fk_idx',
+        'timegrid_timelines_subscription_fk_idx',
+    ]
+    for index in required_fk_indexes:
+        if index not in performance_sql:
+            raise AssertionError(f'missing FK index {index}')
+    if 'alter function public.set_updated_at() set search_path = public, pg_temp;' not in performance_sql:
+        raise AssertionError('set_updated_at must pin search_path')
+    if 'revoke execute on function public.rls_auto_enable() from anon, authenticated' not in performance_sql:
+        raise AssertionError('rls_auto_enable must not be executable by browser roles')
+    if 'revoke execute on function public.rls_auto_enable() from public, anon, authenticated' not in rls_helper_lockdown_sql:
+        raise AssertionError('rls_auto_enable must revoke inherited public execute privileges')
+    if 'create schema if not exists extensions;' not in citext_extension_sql:
+        raise AssertionError('extensions schema must exist before moving citext')
+    if 'alter extension citext set schema extensions;' not in citext_extension_sql:
+        raise AssertionError('citext extension must live outside public schema')
 
     required_constraints = [
         'timegrid_one_default_calendar_per_workspace',
@@ -82,6 +110,9 @@ def main() -> int:
         'indexes': len(required_indexes),
         'migration': str(MIGRATION.relative_to(ROOT)),
         'lockdown_migration': str(LOCKDOWN_MIGRATION.relative_to(ROOT)),
+        'performance_migration': str(PERFORMANCE_MIGRATION.relative_to(ROOT)),
+        'rls_helper_lockdown_migration': str(RLS_HELPER_LOCKDOWN_MIGRATION.relative_to(ROOT)),
+        'citext_extension_migration': str(CITEXT_EXTENSION_MIGRATION.relative_to(ROOT)),
     })
     return 0
 
