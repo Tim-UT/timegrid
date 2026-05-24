@@ -163,6 +163,11 @@ def main() -> int:
             selected_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(calendar_id)}')
             assert selected_workspace['active_calendar_id'] == calendar_id
             assert len(selected_workspace['timelines']) == 1
+            client.json('PATCH', f'/api/personal/sample1/subscriptions/{urllib.parse.quote(subscription["id"])}', {
+                'position': 0,
+            })
+            reordered_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(calendar_id)}')
+            assert reordered_workspace['subscriptions'][0]['id'] == subscription['id'], 'timeline reorder should update order inside the active calendar'
 
             creator_imported = client.json('POST', '/api/personal/sample1/timelines', {
                 'title': 'Creator launch plan',

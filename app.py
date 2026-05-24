@@ -891,6 +891,24 @@ def move_item_to_position(items: list[dict[str, Any]], item: dict[str, Any], pos
     normalize_positions(items)
 
 
+def move_subscription_to_position(user: dict[str, Any], item: dict[str, Any], position: Any) -> None:
+    workspace = item.get('workspace') or 'personal'
+    calendar_id = item.get('calendar_id') or default_calendar_for(user, calendar_workspace(item))
+    siblings = [
+        sub for sub in user.get('subscriptions', [])
+        if sub.get('workspace', 'personal') == workspace
+        and (sub.get('calendar_id') or default_calendar_for(user, calendar_workspace(sub))) == calendar_id
+        and not sub.get('trashed')
+        and not sub.get('grouped_in')
+    ]
+    siblings.sort(key=lambda sub: (int(sub.get('position') or 0), str(sub.get('title') or '').lower()))
+    move_item_to_position(siblings, item, position)
+    position_by_id = {sub.get('id'): sub.get('position') for sub in siblings}
+    for sub in user.get('subscriptions', []):
+        if sub.get('id') in position_by_id:
+            sub['position'] = position_by_id[sub.get('id')]
+
+
 def move_subscription_to_calendar(user: dict[str, Any], item: dict[str, Any], calendar_id: str, workspace: str) -> None:
     item['calendar_id'] = calendar_id
     item['workspace'] = workspace
@@ -1948,6 +1966,9 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
             runtime_url = subscription_runtime_url(acct, user, item, store)
             if runtime_url:
                 visible_urls.append(runtime_url)
+
+    active.sort(key=lambda entry: (int(entry.get('position') or 0), str(entry.get('title') or '').lower()))
+    trash.sort(key=lambda entry: (int(entry.get('position') or 0), str(entry.get('title') or '').lower()))
 
     deduped_visible_urls: list[str] = []
     for url in visible_urls:
@@ -4750,7 +4771,7 @@ class Handler(BaseHTTPRequestHandler):
                     if item['trashed']:
                         item['visible'] = False
                 if 'position' in body:
-                    move_item_to_position(user.get('subscriptions', []), item, body.get('position'))
+                    move_subscription_to_position(user, item, body.get('position'))
                 user['updated_at'] = now_iso()
                 save_user_fragment(store, acct, subscriptions=True, timelines=True)
                 self.send_json(200, serialize_subscription(acct, item, user))

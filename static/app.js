@@ -60,6 +60,10 @@ const state = {
   authDisplayName: '',
   draggedSubscriptionId: '',
   draggedCalendarId: '',
+  dragSubscriptionInsertId: '',
+  dragSubscriptionInsertAfter: false,
+  dragCalendarInsertId: '',
+  dragCalendarInsertAfter: false,
   workspaceLoadSeq: 0,
   workspaceBusyLabel: '',
   timeline: null,
@@ -453,10 +457,10 @@ async function loadTimeline() {
   await hydrateWrapperTimeline();
 }
 
-function noticeTitleAndBody(message) {
+function noticeTitleAndBody(message, isError = false) {
   const text = String(message || '').trim();
   if (text.length <= 90) return { title: text, body: '' };
-  return { title: 'TimeGrid update', body: text };
+  return { title: isError ? 'TimeGrid error' : 'TimeGrid update', body: text };
 }
 
 function scheduleNoticeToastDismiss() {
@@ -473,14 +477,14 @@ function scheduleNoticeToastDismiss() {
   }, 5400);
 }
 
-function recordNotice(message) {
+function recordNotice(message, isError = false) {
   if (!state.me?.authenticated || !message) return;
-  const { title, body } = noticeTitleAndBody(message);
+  const { title, body } = noticeTitleAndBody(message, isError);
   const href = window.location.pathname;
   const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const localItem = {
     id: localId,
-    kind: 'workspace_notice',
+    kind: isError ? 'workspace_error' : 'workspace_notice',
     title,
     body,
     href,
@@ -520,27 +524,18 @@ function refreshNoticeUi() {
 
 function setBanner(message = '', error = '') {
   state.message = '';
-  state.error = error;
+  state.error = '';
   const text = message || error;
   if (text) {
     state.noticeToast = { message: text, error: Boolean(error), exiting: false };
     scheduleNoticeToastDismiss();
   }
-  if (message) recordNotice(message);
+  if (text) recordNotice(text, Boolean(error));
   refreshNoticeUi();
 }
 
 function showToast(message) {
-  let toast = document.querySelector('.toast');
-  if (!toast) {
-    toast = document.createElement('div');
-    toast.className = 'toast';
-    document.body.appendChild(toast);
-  }
-  toast.textContent = message;
-  toast.classList.remove('hidden');
-  window.clearTimeout(window.__tgToastTimer);
-  window.__tgToastTimer = window.setTimeout(() => toast.classList.add('hidden'), 1800);
+  setBanner(message, '');
 }
 
 function closeShareSheet() {
@@ -1153,6 +1148,74 @@ function setWorkspaceBusy(label = '') {
   state.workspaceBusyLabel = label;
 }
 
+function clearDragInsertMarkers() {
+  state.dragSubscriptionInsertId = '';
+  state.dragSubscriptionInsertAfter = false;
+  state.dragCalendarInsertId = '';
+  state.dragCalendarInsertAfter = false;
+  document.querySelectorAll('.insert-before, .insert-after, .drag-over').forEach((node) => {
+    node.classList.remove('insert-before', 'insert-after', 'drag-over');
+  });
+}
+
+function markInsertTarget(node, after) {
+  if (!node) return;
+  node.classList.toggle('insert-before', !after);
+  node.classList.toggle('insert-after', after);
+}
+
+function isAfterPointer(event, node, axis = 'y') {
+  const rect = node.getBoundingClientRect();
+  if (axis === 'x') return event.clientX > rect.left + rect.width / 2;
+  return event.clientY > rect.top + rect.height / 2;
+}
+
+function moveArrayItem(items, itemId, targetIndex) {
+  const fromIndex = items.findIndex((item) => item.id === itemId);
+  if (fromIndex < 0) return false;
+  const nextIndex = Math.max(0, Math.min(targetIndex, items.length));
+  const [item] = items.splice(fromIndex, 1);
+  const adjustedIndex = fromIndex < nextIndex ? nextIndex - 1 : nextIndex;
+  items.splice(Math.max(0, adjustedIndex), 0, item);
+  items.forEach((entry, index) => { entry.position = index; });
+  return true;
+}
+
+function appendArrayItem(items, itemId) {
+  const fromIndex = items.findIndex((item) => item.id === itemId);
+  if (fromIndex < 0) return false;
+  const [item] = items.splice(fromIndex, 1);
+  items.push(item);
+  items.forEach((entry, index) => { entry.position = index; });
+  return true;
+}
+
+async function persistSubscriptionPosition(subscriptionId, position, snapshot, fallbackMessage = 'Could not reorder timeline') {
+  try {
+    await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ position }),
+    });
+  } catch (error) {
+    if (state.personal) state.personal.subscriptions = snapshot;
+    setBanner('', error.message || fallbackMessage);
+    render();
+  }
+}
+
+async function persistCalendarPosition(calendarId, position, snapshot) {
+  try {
+    await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(calendarId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ position }),
+    });
+  } catch (error) {
+    if (state.personal) state.personal.calendars = snapshot;
+    setBanner('', error.message || 'Could not reorder calendar');
+    render();
+  }
+}
+
 function bindCalendarTabActions() {
   document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => button.addEventListener('click', async () => {
     const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
@@ -1218,55 +1281,69 @@ function bindCalendarTabActions() {
     button.addEventListener('dragover', (event) => {
       if (state.draggedSubscriptionId || state.draggedCalendarId) {
         event.preventDefault();
-        button.classList.add('drag-over');
+        const after = isAfterPointer(event, button);
+        state.dragCalendarInsertId = button.dataset.id || '';
+        state.dragCalendarInsertAfter = after;
+        document.querySelectorAll('.calendar-tab.insert-before, .calendar-tab.insert-after, .calendar-tab.drag-over').forEach((node) => {
+          node.classList.remove('insert-before', 'insert-after', 'drag-over');
+        });
+        if (state.draggedSubscriptionId) {
+          button.classList.add('drag-over');
+        } else {
+          markInsertTarget(button, after);
+        }
       }
     });
-    button.addEventListener('dragleave', () => button.classList.remove('drag-over'));
+    button.addEventListener('dragleave', () => {
+      button.classList.remove('drag-over', 'insert-before', 'insert-after');
+    });
     button.addEventListener('drop', async (event) => {
       event.preventDefault();
-      button.classList.remove('drag-over');
+      button.classList.remove('drag-over', 'insert-before', 'insert-after');
       const targetCalendarId = button.dataset.id || '';
       try {
         if (state.draggedSubscriptionId) {
           const subscriptionId = state.draggedSubscriptionId;
           const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
           const workspace = mode === 'creator' ? 'creator' : 'personal';
-          setWorkspaceBusy('Moving timeline...');
+          const snapshot = state.personal?.subscriptions ? state.personal.subscriptions.map((item) => ({ ...item })) : [];
+          if (state.personal) state.personal.subscriptions = state.personal.subscriptions.filter((item) => item.id !== subscriptionId);
           render();
-          await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+          api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
             method: 'PATCH',
             body: JSON.stringify({ calendar_id: targetCalendarId, workspace }),
+          }).then(async () => {
+            state.activeCalendarByMode[mode] = targetCalendarId;
+            state.draggedSubscriptionId = '';
+            await loadWorkspace(mode);
+            render();
+          }).catch((error) => {
+            if (state.personal) state.personal.subscriptions = snapshot;
+            state.draggedSubscriptionId = '';
+            setBanner('', error.message || 'Could not move timeline');
+            render();
           });
-          state.activeCalendarByMode[mode] = targetCalendarId;
-          state.draggedSubscriptionId = '';
-          await loadWorkspace(mode);
-          setWorkspaceBusy('');
-          render();
           return;
         }
         if (state.draggedCalendarId && state.draggedCalendarId !== targetCalendarId) {
           const calendarId = state.draggedCalendarId;
-          setWorkspaceBusy('Reordering calendars...');
-          render();
-          await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(calendarId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ position: Number(button.dataset.index || 0) }),
-          });
+          const targetIndex = Math.max(0, Number(button.dataset.index || 0) + (state.dragCalendarInsertAfter ? 1 : 0));
+          const snapshot = state.personal?.calendars ? state.personal.calendars.map((item) => ({ ...item })) : [];
+          if (state.personal) moveArrayItem(state.personal.calendars, calendarId, targetIndex);
           state.draggedCalendarId = '';
-          await loadWorkspace();
-          setWorkspaceBusy('');
+          clearDragInsertMarkers();
           render();
+          persistCalendarPosition(calendarId, targetIndex, snapshot);
         }
       } catch (error) {
         state.draggedSubscriptionId = '';
         state.draggedCalendarId = '';
-        setWorkspaceBusy('');
         setBanner('', error.message || 'Could not move item');
       }
     });
     button.addEventListener('dragend', () => {
       state.draggedCalendarId = '';
-      document.querySelectorAll('.calendar-tab.drag-over').forEach((node) => node.classList.remove('drag-over'));
+      clearDragInsertMarkers();
     });
   });
 }
@@ -1283,39 +1360,36 @@ function bindSubscriptionDragActions() {
     card.addEventListener('dragover', (event) => {
       if (!state.draggedSubscriptionId || state.draggedSubscriptionId === card.dataset.id) return;
       event.preventDefault();
-      card.classList.add('drag-over');
+      const after = isAfterPointer(event, card);
+      state.dragSubscriptionInsertId = card.dataset.id || '';
+      state.dragSubscriptionInsertAfter = after;
+      document.querySelectorAll('.sub-card.insert-before, .sub-card.insert-after, .sub-card.drag-over').forEach((node) => {
+        node.classList.remove('insert-before', 'insert-after', 'drag-over');
+      });
+      markInsertTarget(card, after);
     });
-    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over', 'insert-before', 'insert-after'));
     card.addEventListener('drop', async (event) => {
       event.preventDefault();
-      card.classList.remove('drag-over');
+      card.classList.remove('drag-over', 'insert-before', 'insert-after');
       const targetId = card.dataset.id || '';
       if (!state.draggedSubscriptionId || state.draggedSubscriptionId === targetId) return;
       const subscriptionId = state.draggedSubscriptionId;
       const cards = [...document.querySelectorAll('[data-draggable-subscription="true"]')];
-      const targetIndex = Math.max(0, cards.findIndex((node) => node.dataset.id === targetId));
-      try {
-        setWorkspaceBusy('Reordering timeline...');
-        render();
-        await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-          method: 'PATCH',
-          body: JSON.stringify({ position: targetIndex }),
-        });
+      const baseIndex = Math.max(0, cards.findIndex((node) => node.dataset.id === targetId));
+      const targetIndex = baseIndex + (state.dragSubscriptionInsertAfter ? 1 : 0);
+      const snapshot = state.personal?.subscriptions ? state.personal.subscriptions.map((item) => ({ ...item })) : [];
+      if (state.personal && moveArrayItem(state.personal.subscriptions, subscriptionId, targetIndex)) {
         state.draggedSubscriptionId = '';
-        await loadWorkspace();
-        setWorkspaceBusy('');
+        clearDragInsertMarkers();
         render();
-      } catch (error) {
-        state.draggedSubscriptionId = '';
-        setWorkspaceBusy('');
-        setBanner('', error.message || 'Could not reorder timeline');
+        persistSubscriptionPosition(subscriptionId, targetIndex, snapshot);
       }
     });
     card.addEventListener('dragend', () => {
       state.draggedSubscriptionId = '';
       card.classList.remove('dragging');
-      document.querySelectorAll('.sub-card.drag-over').forEach((node) => node.classList.remove('drag-over'));
-      document.querySelectorAll('.sub-list.drag-over').forEach((node) => node.classList.remove('drag-over'));
+      clearDragInsertMarkers();
     });
   });
   document.querySelector('[data-drop-subscription-list="true"]')?.addEventListener('dragover', (event) => {
@@ -1332,21 +1406,12 @@ function bindSubscriptionDragActions() {
     event.currentTarget.classList.remove('drag-over');
     if (!state.draggedSubscriptionId) return;
     const subscriptionId = state.draggedSubscriptionId;
-    try {
-      setWorkspaceBusy('Reordering timeline...');
-      render();
-      await api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ position: state.personal.subscriptions.length - 1 }),
-      });
+    const snapshot = state.personal?.subscriptions ? state.personal.subscriptions.map((item) => ({ ...item })) : [];
+    if (state.personal && appendArrayItem(state.personal.subscriptions, subscriptionId)) {
       state.draggedSubscriptionId = '';
-      await loadWorkspace();
-      setWorkspaceBusy('');
+      clearDragInsertMarkers();
       render();
-    } catch (error) {
-      state.draggedSubscriptionId = '';
-      setWorkspaceBusy('');
-      setBanner('', error.message || 'Could not reorder timeline');
+      persistSubscriptionPosition(subscriptionId, Math.max(0, state.personal.subscriptions.length - 1), snapshot);
     }
   });
 }
@@ -1739,7 +1804,6 @@ function renderPersonal() {
         <main class="main-panel workspace-main">
           <div class="calendar-stage">
             ${mastodonProvisioningBanner()}
-            ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
             <section class="calendar-view-section">
               <div class="section-header calendar-view-header">
                 <div>
@@ -1793,7 +1857,6 @@ function renderPersonal() {
       main.innerHTML = `
         <div class="calendar-stage">
           ${mastodonProvisioningBanner()}
-          ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
           ${officialRegistryTableMarkup()}
         </div>`;
     }
@@ -2547,7 +2610,6 @@ function timelineSidebarMarkup() {
 
   return `
     ${mastodonProvisioningBanner()}
-    ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
     <section class="event-composer-card">
       <div class="section-header"><h3>Create event</h3></div>
       <p class="section-copy">Use this panel only for adding new events. Existing single events and series are edited from their own buttons below.</p>
@@ -3554,7 +3616,6 @@ function renderPublished() {
         ${sectionNav()}
       </header>
       <section class="main-panel" style="margin-top:20px;">
-        ${state.error ? `<div class="banner error">${escapeHtml(state.error)}</div>` : ''}
         <div class="published-toolbar">
           <div class="category-tabs">
             ${['public','invited','private'].map((category) => `<button class="category-tab ${category === state.publishedCategory ? 'active' : ''}" data-action="published-tab" data-category="${category}">${labels[category]}</button>`).join('')}
@@ -3823,7 +3884,8 @@ async function boot() {
     await loadCurrentPageData();
     render();
   } catch (error) {
-    state.error = error.message;
+    state.noticeToast = { message: error.message || 'Could not load TimeGrid', error: true, exiting: false };
+    scheduleNoticeToastDismiss();
     render();
   }
 }

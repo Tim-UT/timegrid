@@ -221,6 +221,7 @@ class SupabaseStorage:
                 'calendar_id': row.get('calendar_id') or '',
                 'title': row.get('title') or row.get('url') or 'Subscription',
                 'url': row.get('url') or '',
+                'position': row.get('position') or 0,
                 'visible': bool(row.get('visible')),
                 'trashed': bool(row.get('trashed')),
                 'created_at': row.get('created_at') or '',
