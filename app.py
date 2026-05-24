@@ -3204,6 +3204,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def start_external_auth(self, provider_id: str, next_path: str) -> None:
         if provider_id in {'google', 'apple'} and supabase_auth_enabled():
+            if not external_auth_enabled():
+                self.redirect(f'/auth?next={urllib.parse.quote(next_path, safe="/?=&")}')
+                return
             self.redirect(supabase_oauth_authorize_url(provider_id, next_path))
             return
         config = external_provider_config(provider_id)

@@ -78,6 +78,21 @@ class Client:
         return json.loads(body.decode('utf-8'))
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def redirect_status(base_url: str, path: str) -> tuple[int, str]:
+    opener = urllib.request.build_opener(NoRedirect)
+    req = urllib.request.Request(f'{base_url.rstrip("/")}{path}', method='GET')
+    try:
+        with opener.open(req, timeout=20) as resp:
+            return resp.status, resp.headers.get('Location') or ''
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers.get('Location') or ''
+
+
 def main() -> int:
     with TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -119,6 +134,10 @@ def main() -> int:
             auth_options = client.json('GET', '/api/auth/options?next=%2F')
             providers = auth_options.get('providers') or []
             assert [item.get('id') for item in providers] == ['mastodon'], providers
+            for provider_id in ('google', 'apple'):
+                status, location = redirect_status(app.APP_BASE_URL, f'/auth/provider/{provider_id}/login?next=%2F')
+                assert status == 302, f'{provider_id} login should redirect back to auth when disabled, got {status}'
+                assert location.startswith('/auth?next='), f'{provider_id} login should stay local when disabled, got {location!r}'
 
             status, _body, _headers = client.request('POST', '/api/auth/email/signup', {
                 'email': 'student@example.com',
