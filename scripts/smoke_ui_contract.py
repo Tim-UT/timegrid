@@ -147,6 +147,9 @@ def main() -> int:
                 'state.error = \'\';',
                 'persistSubscriptionPosition(subscriptionId, targetIndex, snapshot)',
                 'persistCalendarPosition(calendarId, targetIndex, snapshot)',
+                'READONLY_FIRST_PAINT_MS = 450',
+                'Promise.allSettled(sourcePromises)',
+                'Loading calendar sources',
                 'Generate link',
             ]:
                 assert marker in app_js, f'missing frontend UI marker: {marker}'

@@ -100,6 +100,8 @@ The calendar app reads configuration from `.env`.
 - `SUPABASE_URL`: Supabase project URL for TimeGrid calendar data
 - `SUPABASE_ANON_KEY`: browser-safe Supabase anon key
 - `SUPABASE_SERVICE_ROLE_KEY`: server-only key used by the Python backend
+- `TIMEGRID_SOURCE_PROXY_TIMEOUT_SECONDS`: max seconds the interactive calendar
+  source proxy waits on an external feed before letting the UI continue
 - `TIMEGRID_ENABLE_EMAIL_AUTH`: optional email/password auth flag; keep `false`
   until SMTP/email delivery is configured
 - `TIMEGRID_ENABLE_EXTERNAL_AUTH`: optional Google/Apple/OIDC auth flag; keep

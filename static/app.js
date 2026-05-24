@@ -123,6 +123,8 @@ function responsiveCalendarGridHeight() {
   return Math.max(700, Math.min(900, height - 220));
 }
 
+const READONLY_FIRST_PAINT_MS = 450;
+
 async function api(url, options = {}) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -3183,50 +3185,71 @@ async function initReadonlyCalendar(elementId, sources, hintId = '') {
     return;
   }
   const token = ++state.readonlyLoadToken;
-  el.innerHTML = '<div class="empty">Loading calendar…</div>';
-  const chunks = await Promise.all(sources.map(async (source) => {
-    try {
-      return await fetchCalendarEventsFromSource(source);
-    } catch (_error) {
-      return [];
+  el.innerHTML = '<div class="empty">Loading calendar sources…</div>';
+  const sourceStates = sources.map((source) => ({ source, done: false, failed: false, events: [] }));
+  let renderSeq = 0;
+  const renderCurrent = async () => {
+    if (token !== state.readonlyLoadToken) return;
+    const seq = ++renderSeq;
+    const expanded = expandEventsList(sourceStates.flatMap((item) => item.events));
+    const pending = sourceStates.filter((item) => !item.done).length;
+    const failed = sourceStates.filter((item) => item.failed).length;
+    const viewScope = `${elementId}:${page}:${currentAcct() || currentPublishedSlug?.() || ''}`;
+    const focus = calendarFocus(expanded, { initialView: savedCalendarView(viewScope) || 'dayGridMonth' });
+    if (state.readonlyCalendar) {
+      state.readonlyCalendar.destroy?.();
+      state.readonlyCalendar = null;
     }
-  }));
-  if (token !== state.readonlyLoadToken) return;
-  const expanded = expandEventsList(chunks.flat());
-  const viewScope = `${elementId}:${page}:${currentAcct() || currentPublishedSlug?.() || ''}`;
-  const focus = calendarFocus(expanded, { initialView: savedCalendarView(viewScope) || 'dayGridMonth' });
-  el.innerHTML = '';
-  const rendererReady = await ensureReadonlyRenderer();
-  if (token !== state.readonlyLoadToken) return;
-  if (rendererReady && window.TimeGridScheduleXCalendar?.mountReadonly) {
-    setCalendarHint(hintId, focus.hint);
-    const mounted = window.TimeGridScheduleXCalendar.mountReadonly(el, {
-      events: expanded.map((item) => ({
-        ...item,
-        description: readonlyEventDescription(item),
-        timeline_color: item.timeline_color || item.source_color || '',
-      })),
-      initialView: focus.initialView,
-      selectedDate: (focus.selectedDate || preferredCalendarDate()).slice(0, 10),
-      weekOptions: { gridHeight: responsiveCalendarGridHeight() },
-      onRangeUpdate(range) {
-        saveCalendarView(viewScope, range?.legacyView || '');
-        setCalendarHint(hintId, calendarGapHint(
-          expanded,
-          range?.startIso || '',
-          range?.endIso || ''
-        ));
-      },
-    });
-    state.readonlyCalendar = {
-      destroy() {
-        window.TimeGridScheduleXCalendar?.destroy?.(el);
-      },
-      app: mounted,
-    };
-    return;
-  }
-  el.innerHTML = '<div class="empty">Calendar renderer unavailable.</div>';
+    el.innerHTML = '';
+    const rendererReady = await ensureReadonlyRenderer();
+    if (token !== state.readonlyLoadToken || seq !== renderSeq) return;
+    if (rendererReady && window.TimeGridScheduleXCalendar?.mountReadonly) {
+      const suffix = pending ? ` Loading ${pending} source${pending === 1 ? '' : 's'}...` : failed ? ` ${failed} source${failed === 1 ? '' : 's'} could not load.` : '';
+      setCalendarHint(hintId, `${focus.hint || ''}${suffix}`.trim());
+      const mounted = window.TimeGridScheduleXCalendar.mountReadonly(el, {
+        events: expanded.map((item) => ({
+          ...item,
+          description: readonlyEventDescription(item),
+          timeline_color: item.timeline_color || item.source_color || '',
+        })),
+        initialView: focus.initialView,
+        selectedDate: (focus.selectedDate || preferredCalendarDate()).slice(0, 10),
+        weekOptions: { gridHeight: responsiveCalendarGridHeight() },
+        onRangeUpdate(range) {
+          saveCalendarView(viewScope, range?.legacyView || '');
+          const rangeHint = calendarGapHint(
+            expanded,
+            range?.startIso || '',
+            range?.endIso || ''
+          );
+          setCalendarHint(hintId, `${rangeHint || ''}${suffix}`.trim());
+        },
+      });
+      state.readonlyCalendar = {
+        destroy() {
+          window.TimeGridScheduleXCalendar?.destroy?.(el);
+        },
+        app: mounted,
+      };
+      return;
+    }
+    el.innerHTML = '<div class="empty">Calendar renderer unavailable.</div>';
+  };
+  const sourcePromises = sourceStates.map(async (entry) => {
+    try {
+      entry.events = await fetchCalendarEventsFromSource(entry.source);
+    } catch (_error) {
+      entry.failed = true;
+    }
+    entry.done = true;
+    await renderCurrent();
+  });
+  window.setTimeout(() => {
+    if (token === state.readonlyLoadToken) renderCurrent();
+  }, READONLY_FIRST_PAINT_MS);
+  Promise.allSettled(sourcePromises).then(() => {
+    if (token === state.readonlyLoadToken) renderCurrent();
+  });
 }
 
 async function parseImportFile(file) {

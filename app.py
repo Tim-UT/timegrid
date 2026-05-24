@@ -62,6 +62,7 @@ STORE_CACHE_LOCK = threading.RLock()
 CALENDAR_TEXT_CACHE: dict[str, tuple[float, str]] = {}
 CALENDAR_TEXT_CACHE_LOCK = threading.RLock()
 CALENDAR_TEXT_CACHE_TTL = int(os.environ.get('TIMEGRID_CALENDAR_TEXT_CACHE_TTL', '600'))
+SOURCE_PROXY_TIMEOUT_SECONDS = float(os.environ.get('TIMEGRID_SOURCE_PROXY_TIMEOUT_SECONDS', '5'))
 
 APP_JS = STATIC_DIR / 'app.js'
 SCHEDULE_X_FRAME_JS = STATIC_DIR / 'schedule-x-frame.js'
@@ -3985,7 +3986,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_bytes(200, local, 'text/calendar; charset=utf-8')
                     return
                 try:
-                    resp = requests.get(item['url'], timeout=20)
+                    resp = requests.get(item['url'], timeout=SOURCE_PROXY_TIMEOUT_SECONDS)
                     resp.raise_for_status()
                 except Exception:
                     self.send_json(502, {'error': 'source_fetch_failed'})
