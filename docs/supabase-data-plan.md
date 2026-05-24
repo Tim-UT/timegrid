@@ -125,5 +125,5 @@ the local 0.5s target. The UI contract smoke guards the current Mastodon-only
 auth page and the frontend hooks for calendar tabs, dragging, and the explicit
 export calendar selector. The auth feature-flag smoke verifies the hidden
 Supabase email and OAuth session routes with mocked Supabase Auth responses and
-example addresses (`student@example.edu`, `google.student@example.edu`) without
-sending real email.
+example addresses (`student@example.edu`, `google.student@example.edu`,
+`apple.student@example.edu`) without sending real email.

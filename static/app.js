@@ -369,7 +369,7 @@ async function submitEmailSignup(payload) {
     method: 'POST',
     body: JSON.stringify(payload),
   });
-  return data.user || null;
+  return data;
 }
 
 async function submitEmailLogin(payload) {
@@ -377,7 +377,7 @@ async function submitEmailLogin(payload) {
     method: 'POST',
     body: JSON.stringify(payload),
   });
-  return data.user || null;
+  return data;
 }
 
 async function completeSupabaseSession(accessToken, provider = 'supabase') {
@@ -3607,8 +3607,11 @@ function renderAuthHub() {
     { id: 'mastodon', label: 'Mastodon', description: 'Sign in with your linked social.time-grid.org account.', status: 'active', login_href: mastodonLoginHref(nextPath) },
   ];
   const mastodonProvider = providers.find((item) => item.id === 'mastodon');
-  const externalProviders = providers.filter((item) => !['mastodon', 'email', 'google', 'apple'].includes(item.id) && item.login_href);
-  const providerSummary = 'Use your social.time-grid.org Mastodon account for TimeGrid access.';
+  const emailProvider = providers.find((item) => item.id === 'email' && item.native_email_auth);
+  const externalProviders = providers.filter((item) => !['mastodon', 'email'].includes(item.id) && item.login_href);
+  const providerSummary = emailProvider || externalProviders.length
+    ? 'Choose one sign-in method. TimeGrid links provider identities to the same calendar profile when the email matches.'
+    : 'Use your social.time-grid.org Mastodon account for TimeGrid access.';
   const isSignup = state.authMode !== 'login';
   root.innerHTML = `
     <div class="auth-shell">
@@ -3623,6 +3626,15 @@ function renderAuthHub() {
           <button type="button" class="${isSignup ? 'active' : ''}" data-action="auth-mode" data-mode="signup">Sign up</button>
           <button type="button" class="${!isSignup ? 'active' : ''}" data-action="auth-mode" data-mode="login">Sign in</button>
         </div>
+        ${emailProvider ? `
+          <form class="auth-email-form" data-action="auth-email-form">
+            ${isSignup ? `<label>Display name<input name="display_name" autocomplete="name" value="${escapeHtml(state.authDisplayName || '')}" placeholder="Student Example" /></label>` : ''}
+            <label>Email<input name="email" type="email" autocomplete="email" required value="${escapeHtml(state.authEmail || '')}" placeholder="student@example.edu" /></label>
+            <label>Password<input name="password" type="password" autocomplete="${isSignup ? 'new-password' : 'current-password'}" required minlength="8" placeholder="At least 8 characters" /></label>
+            <button type="submit" class="primary">${isSignup ? 'Create account with email' : 'Sign in with email'}</button>
+          </form>
+          <div class="auth-divider"><span>or</span></div>
+        ` : ''}
         <div class="auth-secondary-list">
           ${externalProviders.map((provider) => `<a class="button auth-provider-button ${provider.id === 'google' ? 'primary' : ''}" href="${escapeHtml(provider.login_href || '#')}">Continue with ${escapeHtml(provider.label)}</a>`).join('')}
           ${mastodonProvider ? `<a class="button auth-provider-button" href="${escapeHtml(mastodonProvider.login_href || mastodonLoginHref(nextPath))}">Continue with Mastodon</a>` : ''}
@@ -3646,6 +3658,35 @@ function bindAuthActions() {
     state.authSignupStatus = '';
     renderAuthHub();
   }));
+  document.querySelector('[data-action="auth-email-form"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const email = String(formData.get('email') || '').trim().toLowerCase();
+    const password = String(formData.get('password') || '');
+    const displayName = String(formData.get('display_name') || '').trim();
+    state.authEmail = email;
+    state.authDisplayName = displayName;
+    state.authSignupError = '';
+    state.authSignupStatus = state.authMode === 'login' ? 'Signing in...' : 'Creating account...';
+    renderAuthHub();
+    try {
+      const payload = { email, password, display_name: displayName, next: authNextPath() };
+      const data = state.authMode === 'login'
+        ? await submitEmailLogin(payload)
+        : await submitEmailSignup(payload);
+      if (data.verification_required) {
+        state.authSignupStatus = data.message || 'Check your email to confirm your account, then sign in.';
+        renderAuthHub();
+        return;
+      }
+      window.location.href = data.next || (data.user?.acct ? `/u/${encodeURIComponent(data.user.acct)}` : '/');
+    } catch (error) {
+      state.authSignupStatus = '';
+      state.authSignupError = error.message || 'Could not complete email authentication.';
+      renderAuthHub();
+    }
+  });
 }
 
 function renderPublishedEmbed() {

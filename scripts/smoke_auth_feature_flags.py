@@ -106,6 +106,15 @@ def fake_auth_user(access_token: str) -> dict[str, Any]:
             'user_metadata': {'name': 'Google Student', 'avatar_url': 'https://example.edu/avatar.png'},
             'identities': [{'provider': 'google', 'id': 'supabase-google-student'}],
         }
+    if access_token == 'token_apple_browser':
+        return {
+            'id': 'supabase-apple-student',
+            'email': 'apple.student@example.edu',
+            'email_confirmed_at': '2026-05-24T00:00:00Z',
+            'app_metadata': {'provider': 'apple'},
+            'user_metadata': {'name': 'Apple Student'},
+            'identities': [{'provider': 'apple', 'id': 'supabase-apple-student'}],
+        }
     raise RuntimeError('unexpected access token')
 
 
@@ -149,6 +158,13 @@ def main() -> int:
         thread.start()
         client = Client(app.APP_BASE_URL)
         try:
+            options = client.json('GET', '/api/auth/options?next=%2F')
+            provider_ids = [item.get('id') for item in options.get('providers') or []]
+            assert provider_ids == ['mastodon', 'email', 'google', 'apple'], provider_ids
+            assert next(item for item in options['providers'] if item['id'] == 'email')['native_email_auth'] is True
+            assert next(item for item in options['providers'] if item['id'] == 'google')['login_href'].startswith('/auth/provider/google/login')
+            assert next(item for item in options['providers'] if item['id'] == 'apple')['login_href'].startswith('/auth/provider/apple/login')
+
             signup = client.json('POST', '/api/auth/email/signup', {
                 'email': 'student@example.edu',
                 'password': 'correct horse battery staple',
@@ -177,19 +193,32 @@ def main() -> int:
             assert external['ok'] is True
             assert external['user']['acct'] == 'google-student'
 
+            client.request('POST', '/auth/logout')
+            apple = client.json('POST', '/api/auth/supabase/session', {
+                'access_token': 'token_apple_browser',
+                'provider': 'apple',
+                'next': '/u/apple-student',
+            })
+            assert apple['ok'] is True
+            assert apple['user']['acct'] == 'apple-student'
+
             store = app.load_store()
             student = store['users']['student-example']
             google_student = store['users']['google-student']
+            apple_student = store['users']['apple-student']
             assert any(item.get('provider') == 'email' and item.get('email') == 'student@example.edu' for item in student['linked_identities'])
             assert any(item.get('provider') == 'google' and item.get('email') == 'google.student@example.edu' for item in google_student['linked_identities'])
+            assert any(item.get('provider') == 'apple' and item.get('email') == 'apple.student@example.edu' for item in apple_student['linked_identities'])
             assert any(item.get('workspace') == 'personal' for item in student['calendars'])
             assert any(item.get('workspace') == 'creator' for item in student['calendars'])
 
             print(json.dumps({
                 'ok': True,
+                'providers': provider_ids,
                 'email_example': 'student@example.edu',
                 'google_example': 'google.student@example.edu',
-                'users': ['student-example', 'google-student'],
+                'apple_example': 'apple.student@example.edu',
+                'users': ['student-example', 'google-student', 'apple-student'],
             }, indent=2))
         finally:
             app.requests.post = original_post  # type: ignore[assignment]
