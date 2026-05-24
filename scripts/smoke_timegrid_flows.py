@@ -100,6 +100,19 @@ def main() -> int:
                 'workspace': 'personal',
             })['calendar']
             calendar_id = created_calendar['id']
+            duplicate_work_calendar = client.json('POST', '/api/personal/sample1/calendars', {
+                'title': 'Work',
+                'workspace': 'personal',
+            })['calendar']
+            duplicate_work_calendar_2 = client.json('POST', '/api/personal/sample1/calendars', {
+                'title': 'Work',
+                'workspace': 'personal',
+            })['calendar']
+            assert duplicate_work_calendar['title'] == 'Work'
+            assert duplicate_work_calendar_2['title'] == 'Work 2'
+            duplicate_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(duplicate_work_calendar_2["id"])}')
+            assert duplicate_workspace['active_calendar_id'] == duplicate_work_calendar_2['id']
+            assert any(item['id'] == duplicate_work_calendar_2['id'] for item in duplicate_workspace['calendars']), 'duplicate calendar should be visible immediately after reload'
             overflow_calendar = client.json('POST', '/api/personal/sample1/calendars', {
                 'title': 'Overflow',
                 'workspace': 'personal',
