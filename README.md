@@ -16,7 +16,11 @@ The calendar app is a lightweight Python service built around the standard libra
 It provides:
 
 - Mastodon OAuth sign-in
-- local JSON-backed persistence for app data and auth state
+- Supabase-backed persistence for production TimeGrid data
+- local JSON-backed persistence as a development and rollback mode
+- multiple personal and creator calendars shown as vertical workspace tabs
+- calendar-scoped import, publishing, dynamic/static iCal export, CSV export,
+  and editable timelines
 - static frontend assets from `static/`
 - easy deployment as a single process behind a reverse proxy
 
@@ -51,7 +55,10 @@ A typical stack looks like this:
 2. Calendar traffic is proxied to the local Python app on port `9100`.
 3. Mastodon web traffic is proxied to the web process on port `3000`.
 4. Mastodon streaming traffic is proxied to port `4000`.
-5. Local runtime data stays on the server and is not committed back into git.
+5. TimeGrid calendar data is stored in Supabase Postgres when
+   `TIMEGRID_STORAGE=supabase`.
+6. Local JSON runtime files remain available for development and rollback, and
+   are not committed back into git.
 
 ## TimeGrid calendar app
 
@@ -61,6 +68,7 @@ A typical stack looks like this:
 - Python 3.11 or newer
 - `python3-venv` recommended
 - a Mastodon application with client ID and client secret
+- a Supabase project if running production storage
 - a reverse proxy if serving the app publicly over HTTPS
 
 ### Quick start
@@ -87,6 +95,55 @@ The calendar app reads configuration from `.env`.
 - `MASTODON_CLIENT_SECRET`: OAuth client secret created in Mastodon
 - `ADMIN_ACCOUNTS`: comma-separated list of admin account names or emails
 - `PORT`: local bind port for the calendar app, defaults to `9100`
+- `TIMEGRID_STORAGE`: `supabase` for production storage, or `json` for local
+  development and rollback
+- `SUPABASE_URL`: Supabase project URL for TimeGrid calendar data
+- `SUPABASE_ANON_KEY`: browser-safe Supabase anon key
+- `SUPABASE_SERVICE_ROLE_KEY`: server-only key used by the Python backend
+
+Current public auth uses Mastodon OAuth only. Email/password, Google, and Apple
+identity rows are supported by the data model for future expansion, but their
+buttons are intentionally hidden until those providers and email delivery are
+configured.
+
+### TimeGrid data model
+
+The Supabase schema is tracked in `supabase/migrations/`. The main calendar app
+tables are:
+
+- `timegrid_users` and `timegrid_auth_identities`
+- `timegrid_calendars`
+- `timegrid_timelines`
+- `timegrid_subscriptions`
+- `timegrid_published_bundles` and `timegrid_published_bundle_items`
+- `timegrid_exports`
+- `timegrid_notifications`
+- `timegrid_auth_pending` and `timegrid_auth_sessions`
+
+Calendars act like folder tabs. Personal and creator workspaces can each have
+more than one calendar, timelines belong to a calendar, dragging a timeline card
+to another calendar moves it there, and exports are scoped to the selected
+personal calendar.
+
+### Verification
+
+Run the focused checks before changing storage, auth, calendar tabs, import,
+publishing, or export behavior:
+
+```bash
+python3 scripts/test_supabase_schema_contract.py
+python3 scripts/test_storage_reconcile.py
+python3 scripts/smoke_large_dataset.py
+python3 scripts/smoke_performance_budget.py
+python3 scripts/smoke_timegrid_flows.py
+python3 scripts/smoke_ui_contract.py
+```
+
+The smoke suite covers Supabase schema expectations, fragment persistence,
+large dataset transformation, calendar create/switch/move performance, duplicate
+calendar names, personal and creator calendar creation, imports, publish/archive,
+dynamic and static exports, edit-after-dynamic-export, CSV export, timeline
+moves, detach behavior, Mastodon-only auth UI, and export calendar selectors.
 
 ### Calendar runtime files
 
