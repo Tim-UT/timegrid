@@ -11,6 +11,7 @@ LOCKDOWN_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524024404_lock_tim
 PERFORMANCE_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524143708_add_timegrid_fk_indexes_and_function_search_path.sql'
 RLS_HELPER_LOCKDOWN_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524143829_revoke_public_execute_on_rls_auto_enable.sql'
 CITEXT_EXTENSION_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524143948_move_citext_extension_out_of_public.sql'
+CITEXT_RESTORE_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524145113_restore_citext_extension_to_public_for_postgrest.sql'
 
 
 def table_block(sql: str, table: str) -> str:
@@ -33,6 +34,7 @@ def main() -> int:
     performance_sql = PERFORMANCE_MIGRATION.read_text(encoding='utf-8').lower()
     rls_helper_lockdown_sql = RLS_HELPER_LOCKDOWN_MIGRATION.read_text(encoding='utf-8').lower()
     citext_extension_sql = CITEXT_EXTENSION_MIGRATION.read_text(encoding='utf-8').lower()
+    citext_restore_sql = CITEXT_RESTORE_MIGRATION.read_text(encoding='utf-8').lower()
     required_columns = {
         'timegrid_users': ['acct', 'supabase_user_id', 'mastodon_profile', 'onboarding'],
         'timegrid_auth_identities': ['acct', 'provider', 'provider_subject', 'email', 'supabase_user_id'],
@@ -90,7 +92,11 @@ def main() -> int:
     if 'create schema if not exists extensions;' not in citext_extension_sql:
         raise AssertionError('extensions schema must exist before moving citext')
     if 'alter extension citext set schema extensions;' not in citext_extension_sql:
-        raise AssertionError('citext extension must live outside public schema')
+        raise AssertionError('citext extension move migration must be tracked')
+    if 'alter extension citext set schema public;' not in citext_restore_sql:
+        raise AssertionError('citext must be restored to public for PostgREST writes')
+    if "notify pgrst, 'reload schema';" not in citext_restore_sql:
+        raise AssertionError('citext restore must reload the PostgREST schema cache')
 
     required_constraints = [
         'timegrid_one_default_calendar_per_workspace',
@@ -113,6 +119,7 @@ def main() -> int:
         'performance_migration': str(PERFORMANCE_MIGRATION.relative_to(ROOT)),
         'rls_helper_lockdown_migration': str(RLS_HELPER_LOCKDOWN_MIGRATION.relative_to(ROOT)),
         'citext_extension_migration': str(CITEXT_EXTENSION_MIGRATION.relative_to(ROOT)),
+        'citext_restore_migration': str(CITEXT_RESTORE_MIGRATION.relative_to(ROOT)),
     })
     return 0
 
