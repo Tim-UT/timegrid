@@ -261,6 +261,12 @@ def main() -> int:
             assert moved_workspace['active_calendar_id'] == overflow_calendar['id']
             assert any(item['id'] == timeline['id'] for item in moved_workspace['timelines']), 'timeline should move with dragged subscription'
 
+            status, dynamic_after_move_body, _ = client.request('GET', dynamic_path)
+            assert status == 200 and b'Final exam' not in dynamic_after_move_body, 'dynamic export should follow the selected calendar after a timeline moves away'
+
+            status, moved_csv_body, _ = client.request('GET', f'/api/personal/sample1/exports/current.csv?calendar_id={urllib.parse.quote(overflow_calendar["id"])}')
+            assert status == 200 and b'Final exam' in moved_csv_body, 'moved calendar export should include the moved timeline'
+
             detached = client.json('DELETE', f'/api/personal/sample1/subscriptions/{urllib.parse.quote(subscription["id"])}')
             assert detached['mode'] == 'detach'
             detached_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(overflow_calendar["id"])}')
