@@ -22,12 +22,15 @@ class FakeWriter:
     def __init__(self) -> None:
         self.upserts: list[tuple[str, list[dict[str, Any]], str]] = []
         self.patches: list[tuple[str, str, Any, dict[str, Any]]] = []
+        self.operations: list[tuple[str, str]] = []
 
     def upsert(self, table: str, rows: list[dict[str, Any]], *, on_conflict: str) -> None:
         self.upserts.append((table, list(rows), on_conflict))
+        self.operations.append(('upsert', table))
 
     def patch(self, table: str, column: str, value: Any, payload: dict[str, Any]) -> None:
         self.patches.append((table, column, value, dict(payload)))
+        self.operations.append(('patch', table))
 
 
 class FakeStorage(SupabaseStorage):
@@ -236,6 +239,7 @@ def main() -> int:
     assert {row['acct'] for row in notification_rows} == {'sample1'}
     assert all(payload for _table, _column, _value, payload in fragment_storage.writer.patches), 'Supabase patches must never send an empty JSON body'
     assert all(not str(value).startswith(('tl_u2_', 'sub_u2_')) for _table, _column, value, _payload in fragment_storage.writer.patches)
+    assert fragment_storage.writer.operations.index(('upsert', 'timegrid_subscriptions')) < fragment_storage.writer.operations.index(('patch', 'timegrid_timelines')), 'paired timeline subscription row must exist before patching timeline.subscription_id'
 
     roundtrip_store = build_store(users=1, timelines_per_user=6, events_per_timeline=2)
     roundtrip_user = roundtrip_store['users']['sample1']

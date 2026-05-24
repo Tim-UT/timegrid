@@ -357,9 +357,6 @@ class SupabaseStorage:
             timeline_rows = [row for row in rows['timelines_initial'] if row.get('owner_acct') == acct]
             timeline_ids = {row.get('id') for row in timeline_rows}
             self.writer.upsert('timegrid_timelines', timeline_rows, on_conflict='id')
-            for row in rows['timeline_subscription_links']:
-                if row.get('id') in timeline_ids:
-                    self.writer.patch('timegrid_timelines', 'id', row['id'], {'subscription_id': row['subscription_id']})
         if subscriptions:
             subscription_rows = [row for row in rows['subscriptions_initial'] if row.get('owner_acct') == acct]
             subscription_ids = {row.get('id') for row in subscription_rows}
@@ -370,6 +367,10 @@ class SupabaseStorage:
                     payload = {k: v for k, v in row.items() if k != 'id' and v}
                     if payload:
                         self.writer.patch('timegrid_subscriptions', 'id', sub_id, payload)
+        if timelines:
+            for row in rows['timeline_subscription_links']:
+                if row.get('id') in timeline_ids:
+                    self.writer.patch('timegrid_timelines', 'id', row['id'], {'subscription_id': row['subscription_id']})
         if exports:
             self.writer.upsert(
                 'timegrid_exports',
