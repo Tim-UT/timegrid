@@ -1218,6 +1218,167 @@ async function persistCalendarPosition(calendarId, position, snapshot) {
   }
 }
 
+function shallowListSnapshot(items) {
+  return Array.isArray(items) ? items.map((item) => ({ ...item })) : [];
+}
+
+function performSubscriptionReorder(subscriptionId, targetId, after) {
+  if (!state.personal || !subscriptionId || !targetId || subscriptionId === targetId) return;
+  const baseIndex = Math.max(0, state.personal.subscriptions.findIndex((item) => item.id === targetId));
+  const targetIndex = baseIndex + (after ? 1 : 0);
+  const snapshot = shallowListSnapshot(state.personal.subscriptions);
+  if (moveArrayItem(state.personal.subscriptions, subscriptionId, targetIndex)) {
+    state.draggedSubscriptionId = '';
+    clearDragInsertMarkers();
+    render();
+    persistSubscriptionPosition(subscriptionId, targetIndex, snapshot);
+  }
+}
+
+function performSubscriptionAppend(subscriptionId) {
+  if (!state.personal || !subscriptionId) return;
+  const snapshot = shallowListSnapshot(state.personal.subscriptions);
+  if (appendArrayItem(state.personal.subscriptions, subscriptionId)) {
+    state.draggedSubscriptionId = '';
+    clearDragInsertMarkers();
+    render();
+    persistSubscriptionPosition(subscriptionId, Math.max(0, state.personal.subscriptions.length - 1), snapshot);
+  }
+}
+
+function performSubscriptionCalendarMove(subscriptionId, targetCalendarId) {
+  if (!state.personal || !subscriptionId || !targetCalendarId) return;
+  const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
+  const workspace = mode === 'creator' ? 'creator' : 'personal';
+  const snapshot = shallowListSnapshot(state.personal.subscriptions);
+  state.personal.subscriptions = state.personal.subscriptions.filter((item) => item.id !== subscriptionId);
+  state.draggedSubscriptionId = '';
+  clearDragInsertMarkers();
+  render();
+  api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ calendar_id: targetCalendarId, workspace }),
+  }).then(async () => {
+    state.activeCalendarByMode[mode] = targetCalendarId;
+    await loadWorkspace(mode, targetCalendarId);
+    render();
+  }).catch((error) => {
+    if (state.personal) state.personal.subscriptions = snapshot;
+    setBanner('', error.message || 'Could not move timeline');
+    render();
+  });
+}
+
+function performCalendarReorder(calendarId, targetCalendarId, after) {
+  if (!state.personal || !calendarId || !targetCalendarId || calendarId === targetCalendarId) return;
+  const baseIndex = Math.max(0, state.personal.calendars.findIndex((item) => item.id === targetCalendarId));
+  const targetIndex = baseIndex + (after ? 1 : 0);
+  const snapshot = shallowListSnapshot(state.personal.calendars);
+  if (moveArrayItem(state.personal.calendars, calendarId, targetIndex)) {
+    state.draggedCalendarId = '';
+    clearDragInsertMarkers();
+    render();
+    persistCalendarPosition(calendarId, targetIndex, snapshot);
+  }
+}
+
+function dragBlockedByInteractiveTarget(target, root) {
+  const interactive = target?.closest?.('a, button, input, select, textarea, summary, [contenteditable="true"]');
+  return Boolean(interactive && interactive !== root);
+}
+
+function bindPointerDrag(node, type, id) {
+  node.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || dragBlockedByInteractiveTarget(event.target, node)) return;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let active = false;
+
+    const beginDrag = () => {
+      if (active) return;
+      active = true;
+      if (type === 'subscription') state.draggedSubscriptionId = id;
+      if (type === 'calendar') state.draggedCalendarId = id;
+      node.classList.add('dragging');
+      document.body.classList.add('dragging-workspace-item');
+    };
+
+    const clearPointerDrag = () => {
+      node.classList.remove('dragging');
+      document.body.classList.remove('dragging-workspace-item');
+      if (type === 'subscription') state.draggedSubscriptionId = '';
+      if (type === 'calendar') state.draggedCalendarId = '';
+      clearDragInsertMarkers();
+    };
+
+    const onPointerMove = (moveEvent) => {
+      if (!active && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) return;
+      beginDrag();
+      moveEvent.preventDefault();
+      const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      if (type === 'subscription') {
+        const calendarTab = target?.closest?.('.calendar-tab[data-action="switch-calendar"]');
+        const card = target?.closest?.('[data-draggable-subscription="true"]');
+        const list = target?.closest?.('[data-drop-subscription-list="true"]');
+        document.querySelectorAll('.sub-card.insert-before, .sub-card.insert-after, .sub-card.drag-over, .calendar-tab.drag-over').forEach((item) => {
+          item.classList.remove('insert-before', 'insert-after', 'drag-over');
+        });
+        if (calendarTab && calendarTab.dataset.id) {
+          calendarTab.classList.add('drag-over');
+        } else if (card && card.dataset.id && card.dataset.id !== id) {
+          const after = isAfterPointer(moveEvent, card);
+          state.dragSubscriptionInsertId = card.dataset.id || '';
+          state.dragSubscriptionInsertAfter = after;
+          markInsertTarget(card, after);
+        } else if (list) {
+          list.classList.add('drag-over');
+        }
+      } else if (type === 'calendar') {
+        const calendarTab = target?.closest?.('.calendar-tab[data-action="switch-calendar"]');
+        document.querySelectorAll('.calendar-tab.insert-before, .calendar-tab.insert-after, .calendar-tab.drag-over').forEach((item) => {
+          item.classList.remove('insert-before', 'insert-after', 'drag-over');
+        });
+        if (calendarTab && calendarTab.dataset.id && calendarTab.dataset.id !== id) {
+          const after = isAfterPointer(moveEvent, calendarTab);
+          state.dragCalendarInsertId = calendarTab.dataset.id || '';
+          state.dragCalendarInsertAfter = after;
+          markInsertTarget(calendarTab, after);
+        }
+      }
+    };
+
+    const onPointerUp = (upEvent) => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', onPointerUp);
+      document.removeEventListener('pointercancel', onPointerUp);
+      if (!active) return;
+      upEvent.preventDefault();
+      const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY);
+      clearPointerDrag();
+      if (type === 'subscription') {
+        const calendarTab = target?.closest?.('.calendar-tab[data-action="switch-calendar"]');
+        if (calendarTab?.dataset.id) {
+          performSubscriptionCalendarMove(id, calendarTab.dataset.id);
+          return;
+        }
+        const card = target?.closest?.('[data-draggable-subscription="true"]');
+        if (card?.dataset.id && card.dataset.id !== id) {
+          performSubscriptionReorder(id, card.dataset.id, isAfterPointer(upEvent, card));
+          return;
+        }
+        if (target?.closest?.('[data-drop-subscription-list="true"]')) performSubscriptionAppend(id);
+      } else if (type === 'calendar') {
+        const calendarTab = target?.closest?.('.calendar-tab[data-action="switch-calendar"]');
+        if (calendarTab?.dataset.id) performCalendarReorder(id, calendarTab.dataset.id, isAfterPointer(upEvent, calendarTab));
+      }
+    };
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onPointerUp);
+  });
+}
+
 function bindCalendarTabActions() {
   document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => button.addEventListener('click', async () => {
     const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
@@ -1274,6 +1435,7 @@ function bindCalendarTabActions() {
     }
   });
   document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => {
+    bindPointerDrag(button, 'calendar', button.dataset.id || '');
     button.addEventListener('dragstart', (event) => {
       state.draggedCalendarId = button.dataset.id || '';
       event.dataTransfer?.setData('text/timegrid-calendar', state.draggedCalendarId);
@@ -1305,37 +1467,11 @@ function bindCalendarTabActions() {
       const targetCalendarId = button.dataset.id || '';
       try {
         if (state.draggedSubscriptionId) {
-          const subscriptionId = state.draggedSubscriptionId;
-          const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
-          const workspace = mode === 'creator' ? 'creator' : 'personal';
-          const snapshot = state.personal?.subscriptions ? state.personal.subscriptions.map((item) => ({ ...item })) : [];
-          if (state.personal) state.personal.subscriptions = state.personal.subscriptions.filter((item) => item.id !== subscriptionId);
-          render();
-          api(`/api/personal/${encodeURIComponent(currentAcct())}/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ calendar_id: targetCalendarId, workspace }),
-          }).then(async () => {
-            state.activeCalendarByMode[mode] = targetCalendarId;
-            state.draggedSubscriptionId = '';
-            await loadWorkspace(mode);
-            render();
-          }).catch((error) => {
-            if (state.personal) state.personal.subscriptions = snapshot;
-            state.draggedSubscriptionId = '';
-            setBanner('', error.message || 'Could not move timeline');
-            render();
-          });
+          performSubscriptionCalendarMove(state.draggedSubscriptionId, targetCalendarId);
           return;
         }
         if (state.draggedCalendarId && state.draggedCalendarId !== targetCalendarId) {
-          const calendarId = state.draggedCalendarId;
-          const targetIndex = Math.max(0, Number(button.dataset.index || 0) + (state.dragCalendarInsertAfter ? 1 : 0));
-          const snapshot = state.personal?.calendars ? state.personal.calendars.map((item) => ({ ...item })) : [];
-          if (state.personal) moveArrayItem(state.personal.calendars, calendarId, targetIndex);
-          state.draggedCalendarId = '';
-          clearDragInsertMarkers();
-          render();
-          persistCalendarPosition(calendarId, targetIndex, snapshot);
+          performCalendarReorder(state.draggedCalendarId, targetCalendarId, state.dragCalendarInsertAfter);
         }
       } catch (error) {
         state.draggedSubscriptionId = '';
@@ -1352,6 +1488,7 @@ function bindCalendarTabActions() {
 
 function bindSubscriptionDragActions() {
   document.querySelectorAll('[data-draggable-subscription="true"]').forEach((card) => {
+    bindPointerDrag(card, 'subscription', card.dataset.id || '');
     card.addEventListener('dragstart', (event) => {
       state.draggedSubscriptionId = card.dataset.id || '';
       event.dataTransfer?.setData('text/timegrid-subscription', state.draggedSubscriptionId);
@@ -1376,17 +1513,7 @@ function bindSubscriptionDragActions() {
       card.classList.remove('drag-over', 'insert-before', 'insert-after');
       const targetId = card.dataset.id || '';
       if (!state.draggedSubscriptionId || state.draggedSubscriptionId === targetId) return;
-      const subscriptionId = state.draggedSubscriptionId;
-      const cards = [...document.querySelectorAll('[data-draggable-subscription="true"]')];
-      const baseIndex = Math.max(0, cards.findIndex((node) => node.dataset.id === targetId));
-      const targetIndex = baseIndex + (state.dragSubscriptionInsertAfter ? 1 : 0);
-      const snapshot = state.personal?.subscriptions ? state.personal.subscriptions.map((item) => ({ ...item })) : [];
-      if (state.personal && moveArrayItem(state.personal.subscriptions, subscriptionId, targetIndex)) {
-        state.draggedSubscriptionId = '';
-        clearDragInsertMarkers();
-        render();
-        persistSubscriptionPosition(subscriptionId, targetIndex, snapshot);
-      }
+      performSubscriptionReorder(state.draggedSubscriptionId, targetId, state.dragSubscriptionInsertAfter);
     });
     card.addEventListener('dragend', () => {
       state.draggedSubscriptionId = '';
@@ -1407,14 +1534,7 @@ function bindSubscriptionDragActions() {
     event.preventDefault();
     event.currentTarget.classList.remove('drag-over');
     if (!state.draggedSubscriptionId) return;
-    const subscriptionId = state.draggedSubscriptionId;
-    const snapshot = state.personal?.subscriptions ? state.personal.subscriptions.map((item) => ({ ...item })) : [];
-    if (state.personal && appendArrayItem(state.personal.subscriptions, subscriptionId)) {
-      state.draggedSubscriptionId = '';
-      clearDragInsertMarkers();
-      render();
-      persistSubscriptionPosition(subscriptionId, Math.max(0, state.personal.subscriptions.length - 1), snapshot);
-    }
+    performSubscriptionAppend(state.draggedSubscriptionId);
   });
 }
 

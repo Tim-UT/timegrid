@@ -142,6 +142,10 @@ def main() -> int:
                 'data-action="switch-calendar"',
                 'data-action="create-calendar"',
                 'data-draggable-subscription="true"',
+                "bindPointerDrag(card, 'subscription'",
+                "bindPointerDrag(button, 'calendar'",
+                'performSubscriptionCalendarMove',
+                'performSubscriptionReorder',
                 'noticeToastMarkup()',
                 'recordNotice(text, Boolean(error))',
                 "kind: localItem.kind",
@@ -163,6 +167,7 @@ def main() -> int:
                 '.calendar-tab.insert-after::after',
                 '.sub-card.insert-before::before',
                 '.sub-card.insert-after::after',
+                'body.dragging-workspace-item',
                 'background: #e56b4f',
             ]:
                 assert marker in styles_css, f'missing drag insertion indicator style: {marker}'

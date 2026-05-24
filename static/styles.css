@@ -3437,10 +3437,17 @@ button.tinted:hover {
 
 .sub-card[draggable="true"] {
   cursor: grab;
+  touch-action: pan-y;
 }
 
 .sub-card.dragging {
   opacity: 0.55;
+}
+
+body.dragging-workspace-item,
+body.dragging-workspace-item * {
+  cursor: grabbing !important;
+  user-select: none;
 }
 
 .sub-list.drag-over {
