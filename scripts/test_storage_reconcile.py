@@ -111,6 +111,32 @@ def main() -> int:
     assert first == second == FakeResponse.text
     assert calls == [('https://example.com/cached.ics', 1.5)], calls
 
+    app.CALENDAR_TEXT_CACHE.clear()
+    csv_snapshot = {
+        'metadata': {
+            'title': 'Cached export',
+            'website_name': 'TimeGrid',
+            'website_url': 'https://calendar.time-grid.org',
+            'owner_name': 'Sample User',
+        },
+        'sources': [{
+            'url': 'https://example.com/cached.ics',
+            'title': 'Cached source',
+            'author_name': 'Sample User',
+        }],
+        'urls': ['https://example.com/cached.ics'],
+    }
+    csv_calls: list[tuple[str, float]] = []
+    original_get = app.requests.get
+    try:
+        app.requests.get = lambda url, timeout=20: csv_calls.append((url, timeout)) or FakeResponse()  # type: ignore[assignment]
+        app.calendar_text_for_url('https://example.com/cached.ics')
+        app.export_csv_bytes(csv_snapshot)
+    finally:
+        app.requests.get = original_get  # type: ignore[assignment]
+        app.CALENDAR_TEXT_CACHE.clear()
+    assert csv_calls == [('https://example.com/cached.ics', 20)], csv_calls
+
     storage = FakeStorage()
     storage.delete_stale_rows('timegrid_calendars', [{'id': 'cal_keep'}], ('id',))
     storage.delete_stale_rows(

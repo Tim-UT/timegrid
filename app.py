@@ -2570,7 +2570,7 @@ def parse_ics_events(raw_text: str) -> list[dict[str, Any]]:
     return events
 
 
-def export_csv_bytes(snapshot: dict[str, Any]) -> bytes:
+def export_csv_bytes(snapshot: dict[str, Any], store: dict[str, Any] | None = None, session: dict[str, Any] | None = None) -> bytes:
     buf = StringIO()
     writer = csv.writer(buf)
     meta = snapshot['metadata']
@@ -2578,12 +2578,8 @@ def export_csv_bytes(snapshot: dict[str, Any]) -> bytes:
     title_lookup = {item.get('url') or '': item for item in snapshot.get('sources', [])}
     for url in snapshot.get('urls', []):
         source_item = title_lookup.get(url, {})
-        try:
-            resp = requests.get(url, timeout=20)
-            resp.raise_for_status()
-            events = parse_ics_events(resp.text)
-        except Exception:
-            events = []
+        text = calendar_text_for_url(url, store, session)
+        events = parse_ics_events(text) if text else []
         for event in events:
             writer.writerow([
                 meta['title'],
@@ -4010,7 +4006,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if ext == 'csv':
                     filename = f'{acct}-timegrid-export.csv'
-                    self.send_bytes(200, export_csv_bytes(snapshot), 'text/csv; charset=utf-8', headers={
+                    self.send_bytes(200, export_csv_bytes(snapshot, store, session), 'text/csv; charset=utf-8', headers={
                         'Content-Disposition': f'attachment; filename="{filename}"',
                         'Cache-Control': 'no-store',
                     })
