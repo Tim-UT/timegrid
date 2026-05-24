@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+os.environ.setdefault('MASTODON_CLIENT_ID', 'dummy')
+os.environ.setdefault('MASTODON_CLIENT_SECRET', 'dummy')
+
 from timegrid_storage import SupabaseStorage
 from scripts.generate_sample_store import build_store
 from scripts.import_json_to_supabase import transform
+import app
 
 
 class FakeWriter:
@@ -87,6 +92,25 @@ def rows_as_imported(rows: dict[str, list[dict[str, Any]]]) -> dict[str, list[di
 
 
 def main() -> int:
+    class FakeResponse:
+        text = 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    calls: list[tuple[str, float]] = []
+    original_get = app.requests.get
+    app.CALENDAR_TEXT_CACHE.clear()
+    try:
+        app.requests.get = lambda url, timeout=20: calls.append((url, timeout)) or FakeResponse()  # type: ignore[assignment]
+        first = app.calendar_text_for_url('https://example.com/cached.ics', timeout=1.5)
+        second = app.calendar_text_for_url('https://example.com/cached.ics', timeout=1.5)
+    finally:
+        app.requests.get = original_get  # type: ignore[assignment]
+        app.CALENDAR_TEXT_CACHE.clear()
+    assert first == second == FakeResponse.text
+    assert calls == [('https://example.com/cached.ics', 1.5)], calls
+
     storage = FakeStorage()
     storage.delete_stale_rows('timegrid_calendars', [{'id': 'cal_keep'}], ('id',))
     storage.delete_stale_rows(

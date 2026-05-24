@@ -2234,7 +2234,13 @@ def local_calendar_bytes(url: str, store: dict[str, Any], session: dict[str, Any
     return None
 
 
-def calendar_text_for_url(url: str, store: dict[str, Any] | None = None, session: dict[str, Any] | None = None) -> str | None:
+def calendar_text_for_url(
+    url: str,
+    store: dict[str, Any] | None = None,
+    session: dict[str, Any] | None = None,
+    *,
+    timeout: float = 20,
+) -> str | None:
     cache_key = str(url or '')
     now_ts = time.time()
     if cache_key:
@@ -2251,7 +2257,7 @@ def calendar_text_for_url(url: str, store: dict[str, Any] | None = None, session
                     CALENDAR_TEXT_CACHE[cache_key] = (now_ts + CALENDAR_TEXT_CACHE_TTL, text)
             return text
     try:
-        resp = requests.get(url, timeout=20)
+        resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
         text = resp.text
         if cache_key:
@@ -3981,18 +3987,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not item or not item.get('url'):
                     self.send_json(404, {'error': 'not_found'})
                     return
-                local = local_calendar_bytes(item['url'], store, session)
-                if local is not None:
-                    self.send_bytes(200, local, 'text/calendar; charset=utf-8')
-                    return
-                try:
-                    resp = requests.get(item['url'], timeout=SOURCE_PROXY_TIMEOUT_SECONDS)
-                    resp.raise_for_status()
-                except Exception:
+                text = calendar_text_for_url(
+                    item['url'],
+                    store,
+                    session,
+                    timeout=SOURCE_PROXY_TIMEOUT_SECONDS,
+                )
+                if text is None:
                     self.send_json(502, {'error': 'source_fetch_failed'})
                     return
-                content_type = resp.headers.get('Content-Type') or 'text/calendar; charset=utf-8'
-                self.send_bytes(200, resp.text.encode('utf-8'), content_type)
+                self.send_bytes(200, text.encode('utf-8'), 'text/calendar; charset=utf-8')
                 return
             if len(parts) == 5 and parts[3] == 'exports' and parts[4].startswith('current.'):
                 snapshot = build_personal_export_snapshot(acct, user, store, calendar_id=query.get('calendar_id', [''])[0])
