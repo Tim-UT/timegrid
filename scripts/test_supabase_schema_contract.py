@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'supabase' / 'migrations' / '202605230001_initial_timegrid_data.sql'
+LOCKDOWN_MIGRATION = ROOT / 'supabase' / 'migrations' / '20260524024404_lock_timegrid_service_role_access.sql'
 
 
 def table_block(sql: str, table: str) -> str:
@@ -25,6 +26,7 @@ def assert_columns(block: str, table: str, columns: list[str]) -> None:
 
 def main() -> int:
     sql = MIGRATION.read_text(encoding='utf-8')
+    lockdown_sql = LOCKDOWN_MIGRATION.read_text(encoding='utf-8').lower()
     required_columns = {
         'timegrid_users': ['acct', 'supabase_user_id', 'mastodon_profile', 'onboarding'],
         'timegrid_auth_identities': ['acct', 'provider', 'provider_subject', 'email', 'supabase_user_id'],
@@ -43,6 +45,9 @@ def main() -> int:
         rls = f'alter table public.{table} enable row level security;'
         if rls not in sql:
             raise AssertionError(f'{table} must enable row level security')
+        revoke = f'revoke all on table public.{table} from anon, authenticated;'
+        if revoke not in lockdown_sql:
+            raise AssertionError(f'{table} must revoke anon/authenticated table access')
 
     required_indexes = [
         'timegrid_calendars_owner_workspace_idx',
@@ -76,6 +81,7 @@ def main() -> int:
         'tables': len(required_columns),
         'indexes': len(required_indexes),
         'migration': str(MIGRATION.relative_to(ROOT)),
+        'lockdown_migration': str(LOCKDOWN_MIGRATION.relative_to(ROOT)),
     })
     return 0
 

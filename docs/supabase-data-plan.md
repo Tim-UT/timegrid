@@ -80,6 +80,14 @@ providers and re-enabling their UI buttons.
 The app profile should not assume one auth provider per account. Instead,
 `timegrid_auth_identities` links many providers to one TimeGrid `acct`.
 
+## Access Control
+
+The current TimeGrid calendar app reads and writes Supabase through the Python
+backend with the service-role key. The migration set enables RLS on all
+TimeGrid tables and explicitly revokes table access from the `anon` and
+`authenticated` API roles. Browser/client access should be added only through a
+future migration with audited policies for each table and operation.
+
 ## Migration Approach
 
 1. Back up live `store.json` and `auth-state.json`.
@@ -106,7 +114,8 @@ python3 scripts/smoke_ui_contract.py
 ```
 
 The schema contract check proves the migration keeps the required TimeGrid
-tables, calendar/export foreign keys, indexes, constraints, and RLS enablement.
+tables, calendar/export foreign keys, indexes, constraints, RLS enablement, and
+service-role-only table access.
 The smoke flows cover multi-calendar personal and creator workspaces, imports,
 dynamic/static exports, edit-after-dynamic-export, published bundle lifecycle,
 timeline moves, and detach behavior. The performance budget smoke keeps the
