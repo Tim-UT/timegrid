@@ -37,6 +37,10 @@ const state = {
   exportYear: new Date().getFullYear(),
   exportLinkMode: 'dynamic',
   exportLinkUrl: '',
+  createCalendarOpen: false,
+  createCalendarTitle: '',
+  createCalendarSubmitting: false,
+  createCalendarError: '',
   activeCalendarByMode: {},
   mergeToolOpen: false,
   mergeToolSourceId: '',
@@ -1150,6 +1154,88 @@ function setWorkspaceBusy(label = '') {
   state.workspaceBusyLabel = label;
 }
 
+function currentCalendarMode() {
+  return page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
+}
+
+function renderCalendarSurface() {
+  if (page === 'timeline') renderTimeline();
+  else render();
+}
+
+function createCalendarModal() {
+  if (!state.createCalendarOpen) return '';
+  const mode = currentCalendarMode();
+  const workspaceLabel = mode === 'creator' ? 'creator' : 'personal';
+  const title = state.createCalendarTitle || '';
+  return `
+    <div class="modal-backdrop" data-action="close-create-calendar">
+      <div class="modal calendar-create-modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">New calendar</div>
+            <h2>Create ${workspaceLabel} calendar</h2>
+            <p class="muted">Add a folder tab for timelines that belong together.</p>
+          </div>
+          <button class="modal-close" data-action="close-create-calendar" aria-label="Close new calendar">×</button>
+        </div>
+        <form class="calendar-create-form" data-action="submit-create-calendar">
+          <label>Calendar name
+            <input name="title" data-action="create-calendar-title" value="${escapeHtml(title)}" placeholder="Work" autocomplete="off" maxlength="80" required autofocus />
+          </label>
+          ${state.createCalendarError ? `<div class="banner error" role="alert">${escapeHtml(state.createCalendarError)}</div>` : ''}
+          ${state.createCalendarSubmitting ? `<div class="workspace-progress calendar-create-progress" role="status" aria-live="polite"><div class="workspace-progress__bar"></div><span>Creating calendar...</span></div>` : ''}
+          <div class="modal-actions">
+            <button class="primary" type="submit" ${state.createCalendarSubmitting ? 'disabled' : ''}>Create calendar</button>
+            <button type="button" data-action="close-create-calendar" ${state.createCalendarSubmitting ? 'disabled' : ''}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+async function createCalendarFromTitle(title) {
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) {
+    state.createCalendarError = 'Enter a calendar name.';
+    renderCalendarSurface();
+    return;
+  }
+  const mode = currentCalendarMode();
+  const workspace = mode === 'creator' ? 'creator' : 'personal';
+  state.createCalendarTitle = cleanTitle;
+  state.createCalendarSubmitting = true;
+  state.createCalendarError = '';
+  setWorkspaceBusy('Creating calendar...');
+  renderCalendarSurface();
+  try {
+    const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars`, {
+      method: 'POST',
+      body: JSON.stringify({ title: cleanTitle, workspace }),
+    });
+    const calendarId = data.calendar?.id || '';
+    state.activeCalendarByMode[mode] = calendarId;
+    if (state.personal && Array.isArray(data.calendars)) {
+      state.personal.calendars = data.calendars;
+      state.personal.active_calendar_id = calendarId;
+    }
+    await loadWorkspace(mode, calendarId);
+    if (page === 'timeline' && !state.timeline?.id) state.timeline.calendar_id = calendarId;
+    state.createCalendarOpen = false;
+    state.createCalendarTitle = '';
+    state.createCalendarSubmitting = false;
+    state.createCalendarError = '';
+    setWorkspaceBusy('');
+    showToast('Calendar created');
+    renderCalendarSurface();
+  } catch (error) {
+    state.createCalendarSubmitting = false;
+    state.createCalendarError = error.message || 'Could not create calendar';
+    setWorkspaceBusy('');
+    renderCalendarSurface();
+  }
+}
+
 function clearDragInsertMarkers() {
   state.dragSubscriptionInsertId = '';
   state.dragSubscriptionInsertAfter = false;
@@ -1404,35 +1490,25 @@ function bindCalendarTabActions() {
     render();
   }));
   document.querySelector('[data-action="create-calendar"]')?.addEventListener('click', async () => {
-    const title = window.prompt('Calendar name', 'New calendar');
-    if (!title) return;
-    try {
-      const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
-      const workspace = mode === 'creator' ? 'creator' : 'personal';
-      setWorkspaceBusy('Creating calendar...');
-      if (page !== 'timeline') render();
-      const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars`, {
-        method: 'POST',
-        body: JSON.stringify({ title, workspace }),
-      });
-      const calendarId = data.calendar?.id || '';
-      state.activeCalendarByMode[mode] = calendarId;
-      if (state.personal && Array.isArray(data.calendars)) {
-        state.personal.calendars = data.calendars;
-        state.personal.active_calendar_id = calendarId;
-      }
-      await loadWorkspace(mode, calendarId);
-      setWorkspaceBusy('');
-      if (page === 'timeline') {
-        if (!state.timeline?.id) state.timeline.calendar_id = calendarId;
-        renderTimeline();
-      } else {
-        render();
-      }
-    } catch (error) {
-      setWorkspaceBusy('');
-      setBanner('', error.message);
-    }
+    state.createCalendarOpen = true;
+    state.createCalendarTitle = '';
+    state.createCalendarError = '';
+    renderCalendarSurface();
+  });
+  document.querySelectorAll('[data-action="close-create-calendar"]').forEach((node) => node.addEventListener('click', () => {
+    if (state.createCalendarSubmitting) return;
+    state.createCalendarOpen = false;
+    state.createCalendarTitle = '';
+    state.createCalendarError = '';
+    renderCalendarSurface();
+  }));
+  document.querySelector('[data-action="create-calendar-title"]')?.addEventListener('input', (event) => {
+    state.createCalendarTitle = event.target.value || '';
+  });
+  document.querySelector('[data-action="submit-create-calendar"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await createCalendarFromTitle(form.get('title') || '');
   });
   document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => {
     bindPointerDrag(button, 'calendar', button.dataset.id || '');
@@ -1960,6 +2036,7 @@ function renderPersonal() {
         </main>
       </div>
       ${exportModal()}
+      ${createCalendarModal()}
       ${importMenuModal()}
       ${creatorMode ? publishModal() : ''}
       ${mergeToolModal()}
@@ -2881,6 +2958,7 @@ function renderTimeline() {
         </main>
       </div>
       <div id="timeline-overlay-shell">${timelineOverlayMarkup()}</div>
+      ${createCalendarModal()}
       <input id="timeline-import-input" type="file" accept=".ics,.ical,.csv,text/calendar,text/csv" class="hidden" />
     </div>`;
 

@@ -439,6 +439,22 @@ iframe {
   background: rgba(255,255,255,0.96);
   z-index: 2;
 }
+.calendar-create-modal {
+  width: min(520px, 100%);
+}
+.calendar-create-form {
+  display: grid;
+  gap: 14px;
+}
+.calendar-create-form label {
+  display: grid;
+  gap: 8px;
+  font-weight: 850;
+}
+.calendar-create-progress {
+  position: relative;
+  margin: 0;
+}
 .check-list {
   display: grid;
   gap: 10px;

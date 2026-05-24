@@ -160,6 +160,8 @@ def main() -> int:
                 'data-action="export-calendar"',
                 'data-action="switch-calendar"',
                 'data-action="create-calendar"',
+                'data-action="submit-create-calendar"',
+                'data-action="create-calendar-title"',
                 'data-draggable-subscription="true"',
                 "bindPointerDrag(card, 'subscription'",
                 "bindPointerDrag(button, 'calendar'",
@@ -179,9 +181,12 @@ def main() -> int:
             ]:
                 assert marker in app_js, f'missing frontend UI marker: {marker}'
             assert 'document.body.appendChild(toast)' not in app_js, 'legacy fixed toast should not render outside notification area'
+            assert "window.prompt('Calendar name'" not in app_js, 'calendar creation should use the in-app modal, not a blocking prompt'
 
             styles_css = client.text('/styles.css')
             for marker in [
+                '.calendar-create-modal',
+                '.calendar-create-form',
                 '.calendar-tab.insert-before::before',
                 '.calendar-tab.insert-after::after',
                 '.sub-card.insert-before::before',
