@@ -142,9 +142,35 @@ def main() -> int:
                 'data-action="switch-calendar"',
                 'data-action="create-calendar"',
                 'data-draggable-subscription="true"',
+                'noticeToastMarkup()',
+                'recordNotice(text, Boolean(error))',
+                'state.error = \'\';',
+                'persistSubscriptionPosition(subscriptionId, targetIndex, snapshot)',
+                'persistCalendarPosition(calendarId, targetIndex, snapshot)',
                 'Generate link',
             ]:
                 assert marker in app_js, f'missing frontend UI marker: {marker}'
+            assert 'document.body.appendChild(toast)' not in app_js, 'legacy fixed toast should not render outside notification area'
+
+            styles_css = client.text('/styles.css')
+            for marker in [
+                '.calendar-tab.insert-before::before',
+                '.calendar-tab.insert-after::after',
+                '.sub-card.insert-before::before',
+                '.sub-card.insert-after::after',
+                'background: #e56b4f',
+            ]:
+                assert marker in styles_css, f'missing drag insertion indicator style: {marker}'
+
+            notice = client.json('POST', '/api/notifications', {
+                'title': 'UI contract notice',
+                'body': 'Notifications should live in the bell area.',
+                'href': '/u/sample1',
+            })
+            assert notice.get('item', {}).get('title') == 'UI contract notice'
+            notices = client.json('GET', '/api/notifications')
+            assert notices.get('unread', 0) >= 1
+            assert any(item.get('title') == 'UI contract notice' for item in notices.get('items') or [])
 
             created = client.json('POST', '/api/personal/sample1/calendars', {
                 'title': 'UI export chooser',
