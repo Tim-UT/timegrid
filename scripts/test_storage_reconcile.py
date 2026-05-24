@@ -149,6 +149,46 @@ def main() -> int:
     assert ('timegrid_published_bundle_items', ('bundle_remove', 'sub_remove')) in storage.deleted
     assert ('timegrid_published_bundle_items', ('bundle_keep', 'sub_keep')) not in storage.deleted
 
+    full_save_storage = FakeStorage()
+    full_save_store = build_store(users=1, timelines_per_user=1, events_per_timeline=1)
+    full_save_time = full_save_store['users']['sample1']['updated_at']
+    full_save_store['users']['sample1']['calendars'] = [{
+        'id': 'cal_keep',
+        'workspace': 'personal',
+        'title': 'Keep',
+        'color': '#2f7d80',
+        'position': 0,
+        'is_default': True,
+        'archived': False,
+        'created_at': full_save_time,
+        'updated_at': full_save_time,
+    }]
+    full_save_store['users']['sample1']['timelines'][0]['calendar_id'] = 'cal_keep'
+    full_save_store['users']['sample1']['subscriptions'][0]['calendar_id'] = 'cal_keep'
+    full_save_store['published'] = {
+        'bundle_keep': {
+            'id': 'bundle_keep',
+            'slug': 'bundle_keep',
+            'title': 'Keep bundle',
+            'owner_acct': 'sample1',
+            'calendar_id': 'cal_keep',
+            'subscription_ids': ['sub_keep'],
+            'subscription_count': 1,
+            'created_at': full_save_time,
+            'share_url': '',
+            'visibility': 'public',
+            'invited': [],
+            'hashtags': [],
+            'allow_hard_copy': False,
+            'archived': False,
+            'listed': True,
+            'owner_detached': False,
+        }
+    }
+    full_save_storage.save_store(full_save_store)
+    assert ('timegrid_calendars', ('cal_remove',)) in full_save_storage.deleted
+    assert ('timegrid_published_bundle_items', ('bundle_remove', 'sub_remove')) in full_save_storage.deleted
+
     fragment_storage = FakeStorage()
     store = build_store(users=2, timelines_per_user=4, events_per_timeline=2)
     store['users']['sample1']['notifications'] = [{

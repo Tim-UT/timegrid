@@ -320,6 +320,7 @@ class SupabaseStorage:
     def save_store(self, data: dict[str, Any]) -> None:
         rows = transform(data)
         import_rows(self.writer, rows)
+        self.reconcile_stale_rows(rows)
 
     def save_user_fragment(
         self,
