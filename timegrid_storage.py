@@ -362,7 +362,9 @@ class SupabaseStorage:
             for row in rows['subscription_fk_links']:
                 sub_id = row.get('id')
                 if sub_id in subscription_ids:
-                    self.writer.patch('timegrid_subscriptions', 'id', sub_id, {k: v for k, v in row.items() if k != 'id' and v})
+                    payload = {k: v for k, v in row.items() if k != 'id' and v}
+                    if payload:
+                        self.writer.patch('timegrid_subscriptions', 'id', sub_id, payload)
         if exports:
             self.writer.upsert(
                 'timegrid_exports',

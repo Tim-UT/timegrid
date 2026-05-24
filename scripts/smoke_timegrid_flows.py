@@ -113,6 +113,16 @@ def main() -> int:
             duplicate_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(duplicate_work_calendar_2["id"])}')
             assert duplicate_workspace['active_calendar_id'] == duplicate_work_calendar_2['id']
             assert any(item['id'] == duplicate_work_calendar_2['id'] for item in duplicate_workspace['calendars']), 'duplicate calendar should be visible immediately after reload'
+            url_subscription = client.json('POST', '/api/personal/sample1/subscriptions', {
+                'title': 'Plain URL source',
+                'url': 'https://example.com/plain-url-source.ics',
+                'calendar_id': calendar_id,
+                'workspace': 'personal',
+            })
+            reordered_url_subscription = client.json('PATCH', f'/api/personal/sample1/subscriptions/{urllib.parse.quote(url_subscription["id"])}', {
+                'position': 1,
+            })
+            assert reordered_url_subscription['id'] == url_subscription['id'], 'plain URL subscription reorder should not fail'
             overflow_calendar = client.json('POST', '/api/personal/sample1/calendars', {
                 'title': 'Overflow',
                 'workspace': 'personal',

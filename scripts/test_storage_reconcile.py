@@ -144,6 +144,7 @@ def main() -> int:
     assert {row['owner_acct'] for row in timeline_rows} == {'sample1'}
     assert {row['acct'] for row in export_rows} == {'sample1'}
     assert {row['acct'] for row in notification_rows} == {'sample1'}
+    assert all(payload for _table, _column, _value, payload in fragment_storage.writer.patches), 'Supabase patches must never send an empty JSON body'
     assert all(not str(value).startswith(('tl_u2_', 'sub_u2_')) for _table, _column, value, _payload in fragment_storage.writer.patches)
 
     roundtrip_store = build_store(users=1, timelines_per_user=6, events_per_timeline=2)

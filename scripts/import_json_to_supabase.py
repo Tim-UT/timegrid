@@ -394,7 +394,9 @@ def import_rows(client: SupabaseRest, rows: dict[str, list[dict[str, Any]]]) -> 
     client.upsert('timegrid_subscriptions', rows['subscriptions_initial'], on_conflict='id')
     for row in rows['subscription_fk_links']:
         sub_id = row.pop('id')
-        client.patch('timegrid_subscriptions', 'id', sub_id, {k: v for k, v in row.items() if v})
+        payload = {k: v for k, v in row.items() if v}
+        if payload:
+            client.patch('timegrid_subscriptions', 'id', sub_id, payload)
     for row in rows['timeline_subscription_links']:
         client.patch('timegrid_timelines', 'id', row['id'], {'subscription_id': row['subscription_id']})
     client.upsert('timegrid_published_bundles', rows['published'], on_conflict='id')
