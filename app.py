@@ -89,6 +89,22 @@ def ensure_store() -> None:
         save_store({'users': {}, 'published': {}})
 
 
+def clear_calendar_text_cache(*, local_only: bool = False) -> None:
+    with CALENDAR_TEXT_CACHE_LOCK:
+        if not local_only:
+            CALENDAR_TEXT_CACHE.clear()
+            return
+        app_host = urllib.parse.urlparse(APP_BASE_URL).netloc
+        local_paths = ('/ics/', '/bundle/', '/export/')
+        for key in list(CALENDAR_TEXT_CACHE):
+            try:
+                parsed = urllib.parse.urlparse(key)
+            except Exception:
+                parsed = urllib.parse.ParseResult('', '', key, '', '', '')
+            if (not parsed.netloc or parsed.netloc == app_host) and (parsed.path or '').startswith(local_paths):
+                CALENDAR_TEXT_CACHE.pop(key, None)
+
+
 def load_store() -> dict[str, Any]:
     global STORE_CACHE
     if STORAGE is not None:
@@ -121,8 +137,7 @@ def save_store(data: dict[str, Any]) -> None:
         STORAGE.save_store(data)
         with STORE_CACHE_LOCK:
             STORE_CACHE = copy.deepcopy(data)
-        with CALENDAR_TEXT_CACHE_LOCK:
-            CALENDAR_TEXT_CACHE.clear()
+        clear_calendar_text_cache(local_only=True)
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False, dir=DATA_DIR) as tmp:
@@ -131,8 +146,7 @@ def save_store(data: dict[str, Any]) -> None:
         os.fsync(tmp.fileno())
         temp_name = tmp.name
     os.replace(temp_name, DATA_FILE)
-    with CALENDAR_TEXT_CACHE_LOCK:
-        CALENDAR_TEXT_CACHE.clear()
+    clear_calendar_text_cache(local_only=True)
 
 
 def save_user_fragment(
@@ -160,8 +174,7 @@ def save_user_fragment(
         )
         with STORE_CACHE_LOCK:
             STORE_CACHE = copy.deepcopy(data)
-        with CALENDAR_TEXT_CACHE_LOCK:
-            CALENDAR_TEXT_CACHE.clear()
+        clear_calendar_text_cache(local_only=True)
         return
     save_store(data)
 

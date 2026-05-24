@@ -30,6 +30,17 @@ import app  # noqa: E402
 
 T = TypeVar('T')
 BUDGET_MS = float(os.environ.get('TIMEGRID_PERF_BUDGET_MS', '500'))
+REMOTE_CALENDAR_URL = 'https://example.com/timegrid-perf-cache.ics'
+REMOTE_CALENDAR_TEXT = '''BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:remote-perf-1
+SUMMARY:Remote cached performance event
+DTSTART:20260704T140000Z
+DTEND:20260704T150000Z
+END:VEVENT
+END:VCALENDAR
+'''
 
 
 def free_port() -> int:
@@ -124,6 +135,24 @@ def main() -> int:
                 'max_age': 3600,
             }
         }
+        app.CALENDAR_TEXT_CACHE.clear()
+        original_requests_get = app.requests.get
+        remote_calls: list[tuple[str, float]] = []
+
+        class FakeRemoteCalendarResponse:
+            text = REMOTE_CALENDAR_TEXT
+
+            def raise_for_status(self) -> None:
+                return None
+
+        def fake_requests_get(url: str, timeout: float = 20, **kwargs: object) -> object:
+            if url == REMOTE_CALENDAR_URL:
+                remote_calls.append((url, timeout))
+                time.sleep(0.12)
+                return FakeRemoteCalendarResponse()
+            return original_requests_get(url, timeout=timeout, **kwargs)
+
+        app.requests.get = fake_requests_get  # type: ignore[assignment]
 
         port = free_port()
         app.APP_BASE_URL = f'http://127.0.0.1:{port}'
@@ -177,6 +206,30 @@ def main() -> int:
             )
             assert any(item['id'] == timeline['id'] for item in moved_workspace['timelines'])
 
+            remote_subscription = timed('create_remote_subscription', lambda: client.json('POST', '/api/personal/sample1/subscriptions', {
+                'title': 'Remote cached performance source',
+                'url': REMOTE_CALENDAR_URL,
+                'calendar_id': target_calendar['id'],
+                'workspace': 'personal',
+            }))
+            source_path = f'/api/personal/sample1/subscriptions/{urllib.parse.quote(remote_subscription["id"])}/source'
+            status, body, _headers = timed('first_source_proxy_fetch', lambda: client.request('GET', source_path))
+            assert status == 200 and b'Remote cached performance event' in body
+            assert len(remote_calls) == 1, remote_calls
+
+            status, body, _headers = timed('cached_source_proxy_fetch', lambda: client.request('GET', source_path))
+            assert status == 200 and b'Remote cached performance event' in body
+            assert len(remote_calls) == 1, 'cached source proxy fetch should not hit the remote URL again'
+
+            csv_path = f'/api/personal/sample1/exports/current.csv?calendar_id={urllib.parse.quote(target_calendar["id"])}'
+            status, body, _headers = timed('current_csv_uses_source_cache', lambda: client.request('GET', csv_path))
+            assert status == 200 and b'Remote cached performance event' in body
+            assert len(remote_calls) == 1, 'CSV export should reuse the already cached source text'
+
+            status, body, _headers = timed('repeated_current_csv_uses_source_cache', lambda: client.request('GET', csv_path))
+            assert status == 200 and b'Remote cached performance event' in body
+            assert len(remote_calls) == 1, 'repeated CSV export should not hit the remote URL again'
+
             export_record = timed('create_dynamic_export', lambda: client.json('POST', '/api/personal/sample1/exports', {
                 'mode': 'dynamic',
                 'calendar_id': target_calendar['id'],
@@ -184,13 +237,18 @@ def main() -> int:
             export_path = urllib.parse.urlparse(export_record['url']).path
             status, body, _headers = timed('download_dynamic_export', lambda: client.request('GET', export_path))
             assert status == 200 and b'Performance event 1' in body
+            assert b'Remote cached performance event' in body
+            assert len(remote_calls) == 1, 'dynamic export download should reuse the warmed remote source cache'
 
             print(json.dumps({
                 'ok': True,
                 'budget_ms': BUDGET_MS,
+                'remote_fetch_calls': remote_calls,
                 'timings_ms': timings,
             }, indent=2))
         finally:
+            app.requests.get = original_requests_get  # type: ignore[assignment]
+            app.CALENDAR_TEXT_CACHE.clear()
             server.shutdown()
             thread.join(timeout=5)
     return 0
