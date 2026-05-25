@@ -20,8 +20,8 @@ This map tracks user-visible functions, the code/API path that powers them, whet
 | Switch calendar tab | Vertical tab rail | `GET /api/personal/<acct>?calendar_id=...`, `GET /api/creator/<acct>?calendar_id=...` | Yes | Implemented | Calendar tab filters subscriptions, owned timelines, preview calendar, and export defaults. |
 | Reorder calendar tabs | Drag tab in vertical rail | `PATCH /api/personal/<acct>/calendars/<id>` | Yes | Implemented | Frontend uses optimistic reorder with insertion line; backend persists `position`. |
 | Delete calendar tab | `Delete tab` on active non-default tab | `DELETE /api/personal/<acct>/calendars/<id>?target_calendar_id=...` | Mostly yes | Implemented this pass | Archives/hides the tab and moves contained subscriptions/timelines to a selected sibling tab. Default tabs are locked. |
-| Restore archived calendar tab | No visible entry | None | Yes | Missing | Because delete now archives instead of hard-deleting, a future calendar archive manager should expose restore. |
-| Permanent calendar delete | No visible entry | None | One-way | Skipped | Not added because data loss is risky and restore UI does not exist yet. |
+| Restore archived calendar tab | `Deleted tabs` section | `POST /api/personal/<acct>/calendars/<id>/restore` | Yes | Implemented | Restores the tab and moves the archived records back when those records still exist. |
+| Permanent calendar delete | No visible entry | None | One-way | Skipped | Not added because hard deletion is risky; archive/restore now covers normal user intent. |
 
 ## Timelines And Subscriptions
 
@@ -86,7 +86,7 @@ This map tracks user-visible functions, the code/API path that powers them, whet
 
 ## Cleanup Notes
 
-- Calendar deletion is now an archive-and-move flow, not hard deletion.
+- Calendar deletion is now an archive-and-move flow, not hard deletion, and deleted tabs can be restored from the sidebar.
 - Reorder for tabs and timeline cards should stay frontend-optimistic; the database stores only numeric `position`.
 - Any flow that can destroy user-created timelines should have a visible intermediate state first: hide, trash, archive, or detach.
-- Missing future work: archived calendar restore UI, account deletion policy, and a stricter official/admin lifecycle map.
+- Missing future work: account deletion policy and a stricter official/admin lifecycle map.

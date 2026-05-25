@@ -3672,6 +3672,15 @@ body.dragging-workspace-item * {
   overflow: visible;
 }
 
+.archived-calendars-section {
+  margin-top: 12px;
+}
+
+.archived-calendar-card {
+  border-color: rgba(31, 111, 120, 0.2);
+  background: rgba(31, 111, 120, 0.05);
+}
+
 .workspace-sidebar .sub-card header,
 .workspace-sidebar .trash-card header {
   display: grid;

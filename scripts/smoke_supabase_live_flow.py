@@ -235,6 +235,14 @@ def main() -> int:
         moved_workspace = client.json('GET', f'/api/personal/{acct}?calendar_id={urllib.parse.quote(delete_target_calendar["id"])}')
         assert any(item['id'] == delete_import['timeline']['id'] for item in moved_workspace['timelines'])
         assert supabase_count('timegrid_calendars', f'id=eq.{quote_filter(delete_source_calendar["id"])}&archived=eq.true') == 1
+        restored_calendar = client.json('POST', f'/api/personal/{acct}/calendars/{urllib.parse.quote(delete_source_calendar["id"])}/restore', {
+            'move_contents_back': True,
+        })
+        assert restored_calendar['mode'] == 'restore'
+        assert restored_calendar['active_calendar_id'] == delete_source_calendar['id']
+        restored_workspace = client.json('GET', f'/api/personal/{acct}?calendar_id={urllib.parse.quote(delete_source_calendar["id"])}')
+        assert any(item['id'] == delete_import['timeline']['id'] for item in restored_workspace['timelines'])
+        assert supabase_count('timegrid_calendars', f'id=eq.{quote_filter(delete_source_calendar["id"])}&archived=eq.false') == 1
 
         client.json('DELETE', f'/api/personal/{acct}/subscriptions/{urllib.parse.quote(subscription["id"])}?mode=permanent')
         assert supabase_count('timegrid_subscriptions', f'id=eq.{quote_filter(subscription["id"])}') == 0

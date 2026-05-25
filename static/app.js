@@ -1308,6 +1308,7 @@ async function deleteCalendarFromModal() {
     state.activeCalendarByMode[mode] = nextCalendarId;
     if (state.personal && Array.isArray(data.calendars)) {
       state.personal.calendars = data.calendars;
+      if (Array.isArray(data.archived_calendars)) state.personal.archived_calendars = data.archived_calendars;
       state.personal.active_calendar_id = nextCalendarId;
     }
     await loadWorkspace(mode, nextCalendarId);
@@ -1324,6 +1325,35 @@ async function deleteCalendarFromModal() {
     state.deleteCalendarSubmitting = false;
     state.deleteCalendarError = error.message || 'Could not delete calendar';
     setWorkspaceBusy('');
+    renderCalendarSurface();
+  }
+}
+
+async function restoreCalendarTab(calendarId) {
+  if (!calendarId) return;
+  const mode = currentCalendarMode();
+  setWorkspaceBusy('Restoring calendar...');
+  renderCalendarSurface();
+  try {
+    const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(calendarId)}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ move_contents_back: true }),
+    });
+    const restoredId = data.active_calendar_id || data.calendar?.id || calendarId;
+    state.activeCalendarByMode[mode] = restoredId;
+    if (state.personal) {
+      if (Array.isArray(data.calendars)) state.personal.calendars = data.calendars;
+      if (Array.isArray(data.archived_calendars)) state.personal.archived_calendars = data.archived_calendars;
+      state.personal.active_calendar_id = restoredId;
+    }
+    await loadWorkspace(mode, restoredId);
+    setWorkspaceBusy('');
+    const restored = Number(data.restored_timelines || 0) + Number(data.restored_subscriptions || 0);
+    showToast(restored ? `Calendar restored; moved ${restored} records back` : 'Calendar restored');
+    renderCalendarSurface();
+  } catch (error) {
+    setWorkspaceBusy('');
+    setBanner('', error.message || 'Could not restore calendar');
     renderCalendarSurface();
   }
 }
@@ -1803,6 +1833,24 @@ function trashCard(item) {
     </article>`;
 }
 
+function archivedCalendarCard(item) {
+  return `
+    <article class="trash-card archived-calendar-card">
+      <header>
+        <div>
+          <strong>${escapeHtml(item.title || 'Calendar')}</strong>
+          <div class="sub-meta-row">
+            <span class="status-bubble">Deleted tab</span>
+            ${item.archived_at ? `<span class="muted">${escapeHtml(new Date(item.archived_at).toLocaleDateString())}</span>` : ''}
+          </div>
+        </div>
+        <div class="sub-actions">
+          <button type="button" data-action="restore-calendar" data-id="${escapeHtml(item.id)}">Restore tab</button>
+        </div>
+      </header>
+    </article>`;
+}
+
 function publishCard(item, options = {}) {
   const manage = !!options.manage;
   const visibilityLabel = item.visibility === 'private' ? 'Private' : (item.visibility === 'invited' ? `Invited${item.invited?.length ? ` · ${item.invited.length} invited` : ''}` : 'Public');
@@ -2091,6 +2139,7 @@ function renderPersonal() {
   const subscriptionLabel = archiveMode ? 'Archived timelines' : 'Subscriptions';
   const workspaceLabel = creatorMode ? 'Creator page' : archiveMode ? 'Archive page' : 'Personal page';
   const timelineLabel = archiveMode ? 'Archived timelines' : 'Timelines created by me';
+  const archivedCalendars = state.personal.archived_calendars || [];
   root.innerHTML = `
     <div class="page-shell">
       ${personalToolbar()}
@@ -2117,6 +2166,14 @@ function renderPersonal() {
             </div>
             <div class="sub-list">
               ${state.personal.trash.length ? state.personal.trash.map(trashCard).join('') : '<div class="empty">Trash is empty.</div>'}
+            </div>
+          </section>
+          <section class="sidebar-section archived-calendars-section">
+            <div class="section-header trash-section-header">
+              <h3>Deleted tabs <span class="section-count">${archivedCalendars.length}</span></h3>
+            </div>
+            <div class="sub-list">
+              ${archivedCalendars.length ? archivedCalendars.map(archivedCalendarCard).join('') : '<div class="empty">No deleted tabs.</div>'}
             </div>
           </section>`}
         </aside>
@@ -2348,6 +2405,9 @@ function renderPersonal() {
     } catch (error) {
       setBanner('', error.message);
     }
+  }));
+  document.querySelectorAll('[data-action="restore-calendar"]').forEach((button) => button.addEventListener('click', async () => {
+    await restoreCalendarTab(button.dataset.id || '');
   }));
   document.querySelectorAll('[data-action="detach-delete"]').forEach((button) => button.addEventListener('click', async () => {
     const ok = window.confirm('Detach&delete keeps the timeline on the server, but removes your editing access. Continue?');

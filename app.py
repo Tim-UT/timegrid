@@ -992,12 +992,16 @@ def archive_calendar_tab(user: dict[str, Any], calendar_id: str, target_calendar
     target_id = str(target.get('id') or '')
     counts = calendar_content_counts(user, calendar_id, workspace)
     moved_subscription_ids: set[str] = set()
+    moved_timeline_ids: set[str] = set()
     for item in user.get('subscriptions', []):
         item_workspace = str(item.get('workspace') or 'personal')
         item_calendar = str(item.get('calendar_id') or default_calendar_for(user, calendar_workspace(item)))
         if item_workspace == workspace and item_calendar == calendar_id:
             move_subscription_to_calendar(user, item, target_id, workspace)
             moved_subscription_ids.add(str(item.get('id') or ''))
+            owned_timeline_id = str(item.get('owned_timeline_id') or '')
+            if owned_timeline_id:
+                moved_timeline_ids.add(owned_timeline_id)
     for timeline in user.get('timelines', []):
         timeline_workspace = str(timeline.get('workspace') or 'personal')
         timeline_calendar = str(timeline.get('calendar_id') or default_calendar_for(user, workspace))
@@ -1006,7 +1010,12 @@ def archive_calendar_tab(user: dict[str, Any], calendar_id: str, target_calendar
             timeline['calendar_id'] = target_id
             timeline['workspace'] = workspace
             timeline['updated_at'] = now_iso()
+            moved_timeline_ids.add(str(timeline.get('id') or ''))
     calendar['archived'] = True
+    calendar['archived_at'] = now_iso()
+    calendar['archive_target_calendar_id'] = target_id
+    calendar['archive_moved_subscription_ids'] = sorted(moved_subscription_ids)
+    calendar['archive_moved_timeline_ids'] = sorted(moved_timeline_ids)
     calendar['updated_at'] = now_iso()
     workspace_calendars = [item for item in calendars if item.get('workspace') == workspace and not item.get('archived')]
     normalize_positions(workspace_calendars)
@@ -1020,6 +1029,59 @@ def archive_calendar_tab(user: dict[str, Any], calendar_id: str, target_calendar
         'moved_subscriptions': counts['subscriptions'],
         'moved_timelines': counts['timelines'],
         'workspace': workspace,
+    }
+
+
+def restore_calendar_tab(user: dict[str, Any], calendar_id: str, *, move_contents_back: bool = True) -> dict[str, Any]:
+    calendars = ensure_user_calendars(user)
+    calendar = next((item for item in calendars if item.get('id') == calendar_id), None)
+    if not calendar:
+        raise ValueError('calendar_not_found')
+    if not calendar.get('archived'):
+        raise ValueError('calendar_not_archived')
+    workspace = str(calendar.get('workspace') or 'personal')
+    active_siblings = [item for item in calendars if item.get('workspace') == workspace and not item.get('archived')]
+    existing_titles = {str(item.get('title') or '').strip().lower() for item in active_siblings}
+    title = str(calendar.get('title') or 'Restored calendar').strip() or 'Restored calendar'
+    base_title = title
+    counter = 2
+    while title.lower() in existing_titles:
+        title = f'{base_title} {counter}'
+        counter += 1
+    calendar['title'] = title
+    calendar['archived'] = False
+    calendar['updated_at'] = now_iso()
+    calendar['position'] = len(active_siblings)
+    moved_subscription_ids = {str(item) for item in (calendar.get('archive_moved_subscription_ids') or []) if str(item)}
+    moved_timeline_ids = {str(item) for item in (calendar.get('archive_moved_timeline_ids') or []) if str(item)}
+    restored_subscriptions = 0
+    restored_timelines = 0
+    if move_contents_back:
+        for item in user.get('subscriptions', []):
+            if str(item.get('id') or '') in moved_subscription_ids and str(item.get('workspace') or 'personal') == workspace:
+                move_subscription_to_calendar(user, item, calendar_id, workspace)
+                restored_subscriptions += 1
+        for timeline in user.get('timelines', []):
+            timeline_id = str(timeline.get('id') or '')
+            sub_id = str(timeline.get('subscription_id') or '')
+            if timeline_id in moved_timeline_ids and sub_id not in moved_subscription_ids and str(timeline.get('workspace') or 'personal') == workspace:
+                timeline['calendar_id'] = calendar_id
+                timeline['workspace'] = workspace
+                timeline['updated_at'] = now_iso()
+                restored_timelines += 1
+    for key in ('archived_at', 'archive_target_calendar_id', 'archive_moved_subscription_ids', 'archive_moved_timeline_ids'):
+        calendar.pop(key, None)
+    workspace_calendars = [item for item in calendars if item.get('workspace') == workspace and not item.get('archived')]
+    normalize_positions(workspace_calendars)
+    position_by_id = {item.get('id'): item.get('position') for item in workspace_calendars}
+    for item in user.get('calendars', []):
+        if item.get('workspace') == workspace and item.get('id') in position_by_id:
+            item['position'] = position_by_id[item.get('id')]
+    return {
+        'calendar': calendar,
+        'workspace': workspace,
+        'restored_subscriptions': restored_subscriptions,
+        'restored_timelines': restored_timelines,
     }
 
 
@@ -2032,6 +2094,7 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
     visible_urls: list[str] = []
     workspace_for_calendars = 'creator' if mode == 'creator' else 'personal'
     calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace_for_calendars and not item.get('archived')]
+    archived_calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == workspace_for_calendars and item.get('archived')]
     valid_calendar_ids = {str(item.get('id') or '') for item in calendars}
     active_calendar_id = calendar_id if calendar_id in valid_calendar_ids else default_calendar_for(user, workspace_for_calendars)
     membership_check = personal_membership_visible
@@ -2171,6 +2234,7 @@ def build_workspace_payload(acct: str, user: dict[str, Any], store: dict[str, An
         },
         'workspace': mode,
         'calendars': calendars,
+        'archived_calendars': archived_calendars,
         'active_calendar_id': active_calendar_id,
         'subscriptions': active,
         'trash': trash,
@@ -4424,6 +4488,34 @@ class Handler(BaseHTTPRequestHandler):
             store = load_store()
             user = ensure_user(store, acct)
 
+            if len(parts) == 6 and parts[3] == 'calendars' and parts[5] == 'restore':
+                try:
+                    restored = restore_calendar_tab(user, parts[4], move_contents_back=bool(body.get('move_contents_back', True)))
+                except ValueError as exc:
+                    error = str(exc)
+                    if error == 'calendar_not_found':
+                        self.send_json(404, {'error': 'not_found'})
+                    elif error == 'calendar_not_archived':
+                        self.send_json(400, {'error': 'calendar_not_archived'})
+                    else:
+                        self.send_json(400, {'error': error or 'invalid_calendar_restore'})
+                    return
+                user['updated_at'] = now_iso()
+                save_user_fragment(store, acct, calendars=True, subscriptions=True, timelines=True)
+                calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == restored['workspace'] and not item.get('archived')]
+                archived_calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == restored['workspace'] and item.get('archived')]
+                self.send_json(200, {
+                    'ok': True,
+                    'mode': 'restore',
+                    'calendar': restored['calendar'],
+                    'active_calendar_id': restored['calendar'].get('id'),
+                    'calendars': calendars,
+                    'archived_calendars': archived_calendars,
+                    'restored_subscriptions': restored['restored_subscriptions'],
+                    'restored_timelines': restored['restored_timelines'],
+                })
+                return
+
             if parts[3] == 'calendars' and len(parts) == 4:
                 workspace = str(body.get('workspace') or 'personal').strip().lower()
                 if workspace not in {'personal', 'creator'}:
@@ -4995,6 +5087,7 @@ class Handler(BaseHTTPRequestHandler):
                 user['updated_at'] = now_iso()
                 save_user_fragment(store, acct, calendars=True, subscriptions=True, timelines=True)
                 calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == archived['workspace'] and not item.get('archived')]
+                archived_calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == archived['workspace'] and item.get('archived')]
                 self.send_json(200, {
                     'ok': True,
                     'mode': 'archive',
@@ -5002,6 +5095,7 @@ class Handler(BaseHTTPRequestHandler):
                     'target_calendar': archived['target_calendar'],
                     'active_calendar_id': archived['target_calendar'].get('id'),
                     'calendars': calendars,
+                    'archived_calendars': archived_calendars,
                     'moved_subscriptions': archived['moved_subscriptions'],
                     'moved_timelines': archived['moved_timelines'],
                 })

@@ -168,8 +168,17 @@ def main() -> int:
             assert deleted_calendar['mode'] == 'archive'
             assert deleted_calendar['active_calendar_id'] == delete_target_calendar['id']
             assert all(item['id'] != delete_source_calendar['id'] for item in deleted_calendar['calendars']), 'deleted tab should be hidden immediately'
+            assert any(item['id'] == delete_source_calendar['id'] for item in deleted_calendar.get('archived_calendars') or []), 'deleted tab should be reachable for restore'
             delete_target_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(delete_target_calendar["id"])}')
             assert any(item['id'] == delete_source_import['timeline']['id'] for item in delete_target_workspace['timelines']), 'calendar delete should move owned timelines to the selected target'
+            restored_calendar = client.json('POST', f'/api/personal/sample1/calendars/{urllib.parse.quote(delete_source_calendar["id"])}/restore', {
+                'move_contents_back': True,
+            })
+            assert restored_calendar['mode'] == 'restore'
+            assert restored_calendar['active_calendar_id'] == delete_source_calendar['id']
+            assert all(item['id'] != delete_source_calendar['id'] for item in restored_calendar.get('archived_calendars') or []), 'restored tab should leave deleted tabs list'
+            restored_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(delete_source_calendar["id"])}')
+            assert any(item['id'] == delete_source_import['timeline']['id'] for item in restored_workspace['timelines']), 'calendar restore should move archived contents back when possible'
 
             imported = client.json('POST', '/api/personal/sample1/timelines', {
                 'title': 'Imported exams',
