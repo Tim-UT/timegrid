@@ -721,7 +721,7 @@ def create_test_login_session(acct: str, display_name: str = '', *, role: str = 
     user = ensure_user(store, acct)
     user['display_name'] = display_name
     user['updated_at'] = now_iso()
-    save_user_fragment(store, acct, calendars=True)
+    save_store(store)
     session_id = new_id('sess')
     session = {
         'acct': acct,
