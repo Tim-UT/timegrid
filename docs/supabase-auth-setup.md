@@ -61,6 +61,11 @@ mocks Supabase Auth with example addresses `student@example.edu` and
 `google.student@example.edu` / `apple.student@example.edu`, so it verifies
 TimeGrid session/profile wiring without sending real email.
 
+Use `python3 scripts/smoke_auth_browser_render.py` for a rendered auth-page
+check. It starts the same fake Supabase fixture, verifies the email/Google/Apple
+/Mastodon UI in a real headless browser, and still runs the session/profile
+contract.
+
 For Browser verification of the rendered flagged auth page, run the same fake
 Supabase fixture in server mode:
 
