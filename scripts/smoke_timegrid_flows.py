@@ -135,6 +135,41 @@ def main() -> int:
                 'position': 0,
             })['calendar']
             assert moved_calendar['id'] == overflow_calendar['id']
+            delete_source_calendar = client.json('POST', '/api/personal/sample1/calendars', {
+                'title': 'Delete source',
+                'workspace': 'personal',
+            })['calendar']
+            delete_target_calendar = client.json('POST', '/api/personal/sample1/calendars', {
+                'title': 'Delete target',
+                'workspace': 'personal',
+            })['calendar']
+            delete_source_import = client.json('POST', '/api/personal/sample1/timelines', {
+                'title': 'Move before deleting tab',
+                'description': 'Calendar delete should preserve contents',
+                'calendar_id': delete_source_calendar['id'],
+                'workspace': 'personal',
+                'events': [{
+                    'id': 'evt_calendar_delete_move',
+                    'title': 'Move me',
+                    'start': '2026-06-15T14:00:00Z',
+                    'end': '2026-06-15T15:00:00Z',
+                    'description': '',
+                    'location': '',
+                    'url': '',
+                    'recurrence': None,
+                    'exdates': [],
+                    'overrides': [],
+                }],
+            })
+            default_calendar_id = next(item['id'] for item in workspace['calendars'] if item.get('is_default'))
+            status, _body, _headers = client.request('DELETE', f'/api/personal/sample1/calendars/{urllib.parse.quote(default_calendar_id)}')
+            assert status == 400, 'default calendar should not be deleteable'
+            deleted_calendar = client.json('DELETE', f'/api/personal/sample1/calendars/{urllib.parse.quote(delete_source_calendar["id"])}?target_calendar_id={urllib.parse.quote(delete_target_calendar["id"])}')
+            assert deleted_calendar['mode'] == 'archive'
+            assert deleted_calendar['active_calendar_id'] == delete_target_calendar['id']
+            assert all(item['id'] != delete_source_calendar['id'] for item in deleted_calendar['calendars']), 'deleted tab should be hidden immediately'
+            delete_target_workspace = client.json('GET', f'/api/personal/sample1?calendar_id={urllib.parse.quote(delete_target_calendar["id"])}')
+            assert any(item['id'] == delete_source_import['timeline']['id'] for item in delete_target_workspace['timelines']), 'calendar delete should move owned timelines to the selected target'
 
             imported = client.json('POST', '/api/personal/sample1/timelines', {
                 'title': 'Imported exams',

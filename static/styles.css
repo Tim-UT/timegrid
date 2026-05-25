@@ -3359,12 +3359,19 @@ button.tinted:hover {
 .calendar-tabs {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   align-items: stretch;
   width: 132px;
   flex: 0 0 132px;
   padding: 8px;
   border-right: 1px solid var(--line);
+}
+
+.calendar-tab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 .calendar-tab {
@@ -3423,6 +3430,62 @@ button.tinted:hover {
   place-items: center;
   font-size: 18px;
   font-weight: 800;
+}
+
+.calendar-tab-delete {
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(189, 66, 54, 0.24);
+  background: rgba(189, 66, 54, 0.08);
+  color: #9e2f28;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.calendar-delete-form {
+  display: grid;
+  gap: 14px;
+}
+
+.calendar-delete-modal {
+  max-width: 520px;
+}
+
+.calendar-delete-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.calendar-delete-summary span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-subtle);
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 850;
+}
+
+.calendar-delete-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.calendar-delete-form select {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
 }
 
 .workspace-main {

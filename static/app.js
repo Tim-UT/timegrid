@@ -41,6 +41,11 @@ const state = {
   createCalendarTitle: '',
   createCalendarSubmitting: false,
   createCalendarError: '',
+  deleteCalendarOpen: false,
+  deleteCalendarId: '',
+  deleteCalendarTargetId: '',
+  deleteCalendarSubmitting: false,
+  deleteCalendarError: '',
   activeCalendarByMode: {},
   mergeToolOpen: false,
   mergeToolSourceId: '',
@@ -1132,13 +1137,18 @@ function calendarTabs() {
   const mode = page === 'timeline' ? currentTimelineOrigin() : currentWorkspaceMode();
   if (!calendars.length || mode === 'archive') return '';
   const activeId = state.personal?.active_calendar_id || calendars[0]?.id || '';
+  const activeCalendar = calendars.find((item) => item.id === activeId) || calendars[0] || null;
+  const canDeleteActive = activeCalendar && !activeCalendar.is_default && calendars.length > 1;
   return `<nav class="calendar-tabs" aria-label="Calendars">
-    ${calendars.map((item, index) => `
-      <button type="button" class="calendar-tab ${item.id === activeId ? 'active' : ''}" data-action="switch-calendar" data-id="${escapeHtml(item.id)}" data-index="${index}" draggable="true" title="${escapeHtml(item.title)}">
-        <span class="calendar-tab-color" style="background:${escapeHtml(timelineColor(item.color || '#2f7d80'))}"></span>
-        <span>${escapeHtml(item.title || 'Calendar')}</span>
-      </button>`).join('')}
-    <button type="button" class="calendar-tab calendar-tab-add" data-action="create-calendar" title="New calendar">+</button>
+    <div class="calendar-tab-list">
+      ${calendars.map((item, index) => `
+        <button type="button" class="calendar-tab ${item.id === activeId ? 'active' : ''}" data-action="switch-calendar" data-id="${escapeHtml(item.id)}" data-index="${index}" draggable="true" title="${escapeHtml(item.title)}">
+          <span class="calendar-tab-color" style="background:${escapeHtml(timelineColor(item.color || '#2f7d80'))}"></span>
+          <span>${escapeHtml(item.title || 'Calendar')}</span>
+        </button>`).join('')}
+      <button type="button" class="calendar-tab calendar-tab-add" data-action="create-calendar" title="New calendar">+</button>
+    </div>
+    ${canDeleteActive ? `<button type="button" class="calendar-tab-delete" data-action="open-delete-calendar" data-id="${escapeHtml(activeCalendar.id)}">Delete tab</button>` : ''}
   </nav>`;
 }
 
@@ -1194,6 +1204,47 @@ function createCalendarModal() {
     </div>`;
 }
 
+function deleteCalendarModal() {
+  if (!state.deleteCalendarOpen) return '';
+  const calendars = state.personal?.calendars || [];
+  const calendar = calendars.find((item) => item.id === state.deleteCalendarId) || null;
+  if (!calendar) return '';
+  const targets = calendars.filter((item) => item.id !== calendar.id && item.workspace === calendar.workspace);
+  const targetId = state.deleteCalendarTargetId || targets[0]?.id || '';
+  const subscriptionCount = state.personal?.subscriptions?.length || 0;
+  const timelineCount = state.personal?.timelines?.length || 0;
+  return `
+    <div class="modal-backdrop" data-action="close-delete-calendar">
+      <div class="modal calendar-delete-modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">Delete tab</div>
+            <h2>${escapeHtml(calendar.title || 'Calendar')}</h2>
+            <p class="muted">This hides the tab and moves its active timelines into another calendar. Timeline data is not deleted.</p>
+          </div>
+          <button class="modal-close" data-action="close-delete-calendar" aria-label="Close delete tab">×</button>
+        </div>
+        <form class="calendar-delete-form" data-action="submit-delete-calendar">
+          <div class="calendar-delete-summary">
+            <span>${escapeHtml(String(subscriptionCount))} subscriptions</span>
+            <span>${escapeHtml(String(timelineCount))} owned timelines</span>
+          </div>
+          <label>Move contents to
+            <select name="target_calendar_id" data-action="delete-calendar-target" ${state.deleteCalendarSubmitting ? 'disabled' : ''}>
+              ${targets.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === targetId ? 'selected' : ''}>${escapeHtml(item.title || 'Calendar')}</option>`).join('')}
+            </select>
+          </label>
+          ${state.deleteCalendarError ? `<div class="banner error" role="alert">${escapeHtml(state.deleteCalendarError)}</div>` : ''}
+          ${state.deleteCalendarSubmitting ? `<div class="workspace-progress calendar-delete-progress" role="status" aria-live="polite"><div class="workspace-progress__bar"></div><span>Moving timelines...</span></div>` : ''}
+          <div class="modal-actions">
+            <button class="danger" type="submit" ${state.deleteCalendarSubmitting || !targets.length ? 'disabled' : ''}>Delete tab</button>
+            <button type="button" data-action="close-delete-calendar" ${state.deleteCalendarSubmitting ? 'disabled' : ''}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
 async function createCalendarFromTitle(title) {
   const cleanTitle = String(title || '').trim();
   if (!cleanTitle) {
@@ -1231,6 +1282,47 @@ async function createCalendarFromTitle(title) {
   } catch (error) {
     state.createCalendarSubmitting = false;
     state.createCalendarError = error.message || 'Could not create calendar';
+    setWorkspaceBusy('');
+    renderCalendarSurface();
+  }
+}
+
+async function deleteCalendarFromModal() {
+  const calendarId = state.deleteCalendarId || '';
+  const targetCalendarId = state.deleteCalendarTargetId || '';
+  if (!calendarId || !targetCalendarId) {
+    state.deleteCalendarError = 'Choose where to move this tab contents.';
+    renderCalendarSurface();
+    return;
+  }
+  const mode = currentCalendarMode();
+  state.deleteCalendarSubmitting = true;
+  state.deleteCalendarError = '';
+  setWorkspaceBusy('Moving timelines...');
+  renderCalendarSurface();
+  try {
+    const data = await api(`/api/personal/${encodeURIComponent(currentAcct())}/calendars/${encodeURIComponent(calendarId)}?target_calendar_id=${encodeURIComponent(targetCalendarId)}`, {
+      method: 'DELETE',
+    });
+    const nextCalendarId = data.active_calendar_id || data.target_calendar?.id || targetCalendarId;
+    state.activeCalendarByMode[mode] = nextCalendarId;
+    if (state.personal && Array.isArray(data.calendars)) {
+      state.personal.calendars = data.calendars;
+      state.personal.active_calendar_id = nextCalendarId;
+    }
+    await loadWorkspace(mode, nextCalendarId);
+    state.deleteCalendarOpen = false;
+    state.deleteCalendarId = '';
+    state.deleteCalendarTargetId = '';
+    state.deleteCalendarSubmitting = false;
+    state.deleteCalendarError = '';
+    setWorkspaceBusy('');
+    const moved = Number(data.moved_timelines || 0) + Number(data.moved_subscriptions || 0);
+    showToast(moved ? `Calendar deleted; moved ${moved} records` : 'Calendar deleted');
+    renderCalendarSurface();
+  } catch (error) {
+    state.deleteCalendarSubmitting = false;
+    state.deleteCalendarError = error.message || 'Could not delete calendar';
     setWorkspaceBusy('');
     renderCalendarSurface();
   }
@@ -1509,6 +1601,35 @@ function bindCalendarTabActions() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     await createCalendarFromTitle(form.get('title') || '');
+  });
+  document.querySelector('[data-action="open-delete-calendar"]')?.addEventListener('click', (event) => {
+    const calendars = state.personal?.calendars || [];
+    const calendarId = event.currentTarget.dataset.id || state.personal?.active_calendar_id || '';
+    const calendar = calendars.find((item) => item.id === calendarId);
+    if (!calendar || calendar.is_default) return;
+    const target = calendars.find((item) => item.id !== calendarId && item.workspace === calendar.workspace);
+    state.deleteCalendarOpen = true;
+    state.deleteCalendarId = calendarId;
+    state.deleteCalendarTargetId = target?.id || '';
+    state.deleteCalendarError = '';
+    renderCalendarSurface();
+  });
+  document.querySelectorAll('[data-action="close-delete-calendar"]').forEach((node) => node.addEventListener('click', () => {
+    if (state.deleteCalendarSubmitting) return;
+    state.deleteCalendarOpen = false;
+    state.deleteCalendarId = '';
+    state.deleteCalendarTargetId = '';
+    state.deleteCalendarError = '';
+    renderCalendarSurface();
+  }));
+  document.querySelector('[data-action="delete-calendar-target"]')?.addEventListener('change', (event) => {
+    state.deleteCalendarTargetId = event.target.value || '';
+  });
+  document.querySelector('[data-action="submit-delete-calendar"]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    state.deleteCalendarTargetId = String(form.get('target_calendar_id') || state.deleteCalendarTargetId || '');
+    await deleteCalendarFromModal();
   });
   document.querySelectorAll('[data-action="switch-calendar"]').forEach((button) => {
     bindPointerDrag(button, 'calendar', button.dataset.id || '');
@@ -2037,6 +2158,7 @@ function renderPersonal() {
       </div>
       ${exportModal()}
       ${createCalendarModal()}
+      ${deleteCalendarModal()}
       ${importMenuModal()}
       ${creatorMode ? publishModal() : ''}
       ${mergeToolModal()}
@@ -2959,6 +3081,7 @@ function renderTimeline() {
       </div>
       <div id="timeline-overlay-shell">${timelineOverlayMarkup()}</div>
       ${createCalendarModal()}
+      ${deleteCalendarModal()}
       <input id="timeline-import-input" type="file" accept=".ics,.ical,.csv,text/calendar,text/csv" class="hidden" />
     </div>`;
 

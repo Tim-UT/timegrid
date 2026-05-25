@@ -961,6 +961,68 @@ def move_subscription_to_calendar(user: dict[str, Any], item: dict[str, Any], ca
         timeline['updated_at'] = now_iso()
 
 
+def calendar_content_counts(user: dict[str, Any], calendar_id: str, workspace: str) -> dict[str, int]:
+    subscriptions = [
+        item for item in user.get('subscriptions', [])
+        if (item.get('workspace') or 'personal') == workspace
+        and str(item.get('calendar_id') or default_calendar_for(user, calendar_workspace(item))) == calendar_id
+    ]
+    timelines = [
+        item for item in user.get('timelines', [])
+        if (item.get('workspace') or 'personal') == workspace
+        and str(item.get('calendar_id') or default_calendar_for(user, workspace)) == calendar_id
+    ]
+    return {'subscriptions': len(subscriptions), 'timelines': len(timelines)}
+
+
+def archive_calendar_tab(user: dict[str, Any], calendar_id: str, target_calendar_id: str = '') -> dict[str, Any]:
+    calendars = ensure_user_calendars(user)
+    calendar = next((item for item in calendars if item.get('id') == calendar_id), None)
+    if not calendar or calendar.get('archived'):
+        raise ValueError('calendar_not_found')
+    if calendar.get('is_default'):
+        raise ValueError('default_calendar_locked')
+    workspace = str(calendar.get('workspace') or 'personal')
+    active_siblings = [item for item in calendars if item.get('workspace') == workspace and not item.get('archived') and item.get('id') != calendar_id]
+    if not active_siblings:
+        raise ValueError('calendar_needs_target')
+    target = next((item for item in active_siblings if item.get('id') == target_calendar_id), None)
+    if not target:
+        target = sorted(active_siblings, key=lambda item: (int(item.get('position') or 0), str(item.get('title') or '').lower()))[0]
+    target_id = str(target.get('id') or '')
+    counts = calendar_content_counts(user, calendar_id, workspace)
+    moved_subscription_ids: set[str] = set()
+    for item in user.get('subscriptions', []):
+        item_workspace = str(item.get('workspace') or 'personal')
+        item_calendar = str(item.get('calendar_id') or default_calendar_for(user, calendar_workspace(item)))
+        if item_workspace == workspace and item_calendar == calendar_id:
+            move_subscription_to_calendar(user, item, target_id, workspace)
+            moved_subscription_ids.add(str(item.get('id') or ''))
+    for timeline in user.get('timelines', []):
+        timeline_workspace = str(timeline.get('workspace') or 'personal')
+        timeline_calendar = str(timeline.get('calendar_id') or default_calendar_for(user, workspace))
+        sub_id = str(timeline.get('subscription_id') or '')
+        if timeline_workspace == workspace and timeline_calendar == calendar_id and sub_id not in moved_subscription_ids:
+            timeline['calendar_id'] = target_id
+            timeline['workspace'] = workspace
+            timeline['updated_at'] = now_iso()
+    calendar['archived'] = True
+    calendar['updated_at'] = now_iso()
+    workspace_calendars = [item for item in calendars if item.get('workspace') == workspace and not item.get('archived')]
+    normalize_positions(workspace_calendars)
+    position_by_id = {item.get('id'): item.get('position') for item in workspace_calendars}
+    for item in user.get('calendars', []):
+        if item.get('workspace') == workspace and item.get('id') in position_by_id:
+            item['position'] = position_by_id[item.get('id')]
+    return {
+        'calendar': calendar,
+        'target_calendar': target,
+        'moved_subscriptions': counts['subscriptions'],
+        'moved_timelines': counts['timelines'],
+        'workspace': workspace,
+    }
+
+
 def migrate_merged_groups(user: dict[str, Any]) -> None:
     for item in user.get('subscriptions', []):
         if item.get('kind') != 'bundle':
@@ -4907,6 +4969,43 @@ class Handler(BaseHTTPRequestHandler):
             if session is None:
                 return
             parts = [part for part in path.split('/') if part]
+            if len(parts) == 5 and parts[3] == 'calendars':
+                acct = parts[2]
+                if not self.can_access_personal(acct, session):
+                    self.send_json(403, {'error': 'forbidden'})
+                    return
+                store = load_store()
+                user = ensure_user(store, acct)
+                calendar_id = parts[4]
+                query = urllib.parse.parse_qs(parsed.query)
+                target_calendar_id = query.get('target_calendar_id', [''])[0]
+                try:
+                    archived = archive_calendar_tab(user, calendar_id, target_calendar_id)
+                except ValueError as exc:
+                    error = str(exc)
+                    if error == 'calendar_not_found':
+                        self.send_json(404, {'error': 'not_found'})
+                    elif error == 'default_calendar_locked':
+                        self.send_json(400, {'error': 'default_calendar_locked'})
+                    elif error == 'calendar_needs_target':
+                        self.send_json(400, {'error': 'calendar_needs_target'})
+                    else:
+                        self.send_json(400, {'error': error or 'invalid_calendar_delete'})
+                    return
+                user['updated_at'] = now_iso()
+                save_user_fragment(store, acct, calendars=True, subscriptions=True, timelines=True)
+                calendars = [item for item in ensure_user_calendars(user) if item.get('workspace') == archived['workspace'] and not item.get('archived')]
+                self.send_json(200, {
+                    'ok': True,
+                    'mode': 'archive',
+                    'calendar': archived['calendar'],
+                    'target_calendar': archived['target_calendar'],
+                    'active_calendar_id': archived['target_calendar'].get('id'),
+                    'calendars': calendars,
+                    'moved_subscriptions': archived['moved_subscriptions'],
+                    'moved_timelines': archived['moved_timelines'],
+                })
+                return
             if len(parts) == 5 and parts[3] == 'published':
                 acct = parts[2]
                 if not self.can_access_personal(acct, session):

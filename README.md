@@ -131,6 +131,10 @@ more than one calendar, timelines belong to a calendar, dragging a timeline card
 to another calendar moves it there, and exports are scoped to the selected
 personal calendar.
 
+The user-facing flow audit is tracked in
+[`docs/function-flow-map.md`](docs/function-flow-map.md). It maps each major
+function to its entry point, API path, reversibility, and known product gaps.
+
 ### Verification
 
 Run the focused checks before changing storage, auth, calendar tabs, import,
