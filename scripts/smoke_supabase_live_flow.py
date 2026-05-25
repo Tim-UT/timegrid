@@ -202,6 +202,40 @@ def main() -> int:
         status, csv_body, _headers = client.request('GET', f'/api/personal/{acct}/exports/current.csv?calendar_id={urllib.parse.quote(target_calendar["id"])}')
         assert status == 200 and b'Live smoke edited event' in csv_body
 
+        delete_source_calendar = client.json('POST', f'/api/personal/{acct}/calendars', {
+            'title': 'Live delete source',
+            'workspace': 'personal',
+        })['calendar']
+        delete_target_calendar = client.json('POST', f'/api/personal/{acct}/calendars', {
+            'title': 'Live delete target',
+            'workspace': 'personal',
+        })['calendar']
+        delete_import = client.json('POST', f'/api/personal/{acct}/timelines', {
+            'title': 'Move through deleted tab',
+            'description': 'Created by smoke_supabase_live_flow.py',
+            'calendar_id': delete_source_calendar['id'],
+            'workspace': 'personal',
+            'events': [{
+                'id': 'evt_live_delete_move',
+                'title': 'Move through tab delete',
+                'start': '2026-08-03T14:00:00Z',
+                'end': '2026-08-03T15:00:00Z',
+                'description': '',
+                'location': 'Browser Lab',
+                'url': '',
+                'recurrence': None,
+                'exdates': [],
+                'overrides': [],
+            }],
+        })
+        archived_calendar = client.json('DELETE', f'/api/personal/{acct}/calendars/{urllib.parse.quote(delete_source_calendar["id"])}?target_calendar_id={urllib.parse.quote(delete_target_calendar["id"])}')
+        assert archived_calendar['mode'] == 'archive'
+        assert archived_calendar['active_calendar_id'] == delete_target_calendar['id']
+        assert all(item['id'] != delete_source_calendar['id'] for item in archived_calendar['calendars'])
+        moved_workspace = client.json('GET', f'/api/personal/{acct}?calendar_id={urllib.parse.quote(delete_target_calendar["id"])}')
+        assert any(item['id'] == delete_import['timeline']['id'] for item in moved_workspace['timelines'])
+        assert supabase_count('timegrid_calendars', f'id=eq.{quote_filter(delete_source_calendar["id"])}&archived=eq.true') == 1
+
         client.json('DELETE', f'/api/personal/{acct}/subscriptions/{urllib.parse.quote(subscription["id"])}?mode=permanent')
         assert supabase_count('timegrid_subscriptions', f'id=eq.{quote_filter(subscription["id"])}') == 0
         assert supabase_count('timegrid_timelines', f'id=eq.{quote_filter(timeline["id"])}') == 0
