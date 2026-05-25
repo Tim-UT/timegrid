@@ -61,6 +61,20 @@ mocks Supabase Auth with example addresses `student@example.edu` and
 `google.student@example.edu` / `apple.student@example.edu`, so it verifies
 TimeGrid session/profile wiring without sending real email.
 
+For Browser verification of the rendered flagged auth page, run the same fake
+Supabase fixture in server mode:
+
+```bash
+python3 scripts/smoke_auth_feature_flags.py --serve-fixture
+```
+
+Open the printed `base_url` in Browser at `/auth?next=%2F`. The fixture exposes
+the email form, Google button, Apple button, and Mastodon button while keeping
+all Supabase calls local and deterministic. Use `student@example.edu` with a
+password such as `correct horse battery staple` for the email flow; the fixture
+also accepts `token_google_browser` and `token_apple_browser` on
+`/api/auth/supabase/session` for provider-session checks.
+
 ## Local Browser QA
 
 For local UI testing without sending real OAuth or email traffic, run the app

@@ -146,6 +146,17 @@ python3 scripts/smoke_timegrid_flows.py
 python3 scripts/smoke_ui_contract.py
 ```
 
+For rendered Browser QA of the feature-flagged auth page without real email or
+OAuth traffic, run:
+
+```bash
+python3 scripts/smoke_auth_feature_flags.py --serve-fixture
+```
+
+Then open the printed `base_url` at `/auth?next=%2F`. The fixture uses
+`student@example.edu`, `google.student@example.edu`, and
+`apple.student@example.edu`.
+
 The smoke suite covers Supabase schema expectations, fragment persistence,
 large dataset transformation, calendar create/switch/move performance, duplicate
 calendar names, personal and creator calendar creation, imports, publish/archive,
